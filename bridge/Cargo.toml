@@ -1,0 +1,8 @@
+[package]
+name = "bridge"
+description = "Consumer-side daemon: vsock/unix socket <-> /dev/uhid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

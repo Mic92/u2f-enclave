@@ -1,0 +1,34 @@
+{
+  description = "u2f-enclave: FIDO2 authenticator running as a confidential VM (SEV-SNP)";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+  };
+
+  outputs =
+    inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      perSystem =
+        { pkgs, ... }:
+        {
+          devShells.default = pkgs.mkShell {
+            packages = with pkgs; [
+              rustc
+              cargo
+              rustfmt
+              clippy
+              rust-analyzer
+              cargo-watch
+            ];
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
+
+          formatter = pkgs.nixfmt-rfc-style;
+        };
+    };
+}

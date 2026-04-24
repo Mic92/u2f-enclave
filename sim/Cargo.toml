@@ -1,0 +1,10 @@
+[package]
+name = "sim"
+description = "Host simulator: runs the authenticator over a Unix socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ctap = { path = "../ctap" }
+getrandom = "0.2"

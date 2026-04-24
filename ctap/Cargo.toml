@@ -1,0 +1,13 @@
+[package]
+name = "ctap"
+description = "no_std CTAPHID + CTAP2 authenticator core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Crypto lands in M1; keep the core dependency-free for now so the
+# auditable TCB is just this crate + alloc.
+
+[features]
+default = []
