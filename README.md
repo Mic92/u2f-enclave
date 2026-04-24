@@ -86,13 +86,20 @@ attest: cred_id      5e48c479276d74f3…
 credential over hidraw, checks the report binds it (check 1), and writes
 the 1184-byte report to stdout.
 
-Copy `report.bin` to any other Linux box with the same `u2f-enclave`
-binary — your laptop, a CI runner, your server. No AMD hardware, no
-`/dev/kvm`. The chip's certificate is a one-time fetch (it only changes
-when that machine takes a microcode update):
+You also need the chip's certificate from AMD. `vcek-url` turns a report
+into the fetch URL; run it on whichever side has network (it only reads
+the report, no devices). The certificate is good until that chip's next
+microcode update, so the SNP host's operator can fetch it once and ship
+it alongside everything else.
 
 ```console
-laptop$ curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"
+$ curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"
+```
+
+Now verify — any Linux box with the same `u2f-enclave` binary; no AMD
+hardware, no `/dev/kvm`:
+
+```console
 laptop$ u2f-enclave verify --vcek vcek.der < report.bin
 report_data   6f020c9e5d1731ca…
 measurement   70eabebbf79908ce…  ok
