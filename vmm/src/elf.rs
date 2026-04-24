@@ -20,8 +20,16 @@ fn u64le(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(rd(b, off))
 }
 
-/// Returns the PVH 32-bit entry address.
-pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<u32> {
+pub struct Loaded {
+    pub entry: u32,
+    /// Page-aligned [lo, hi) extent covering every PT_LOAD; this is what the
+    /// SNP launch must encrypt+measure so the guest finds its code, page
+    /// tables, .bss heap and stack all pre-validated.
+    pub lo: u64,
+    pub hi: u64,
+}
+
+pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<Loaded> {
     if img.len() < 64 || &img[..4] != b"\x7fELF" || img[4] != 2 {
         return Err(io::Error::other("not ELF64"));
     }
@@ -29,6 +37,7 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<u32> {
     let phentsize = u16le(img, 54) as usize;
     let phnum = u16le(img, 56) as usize;
     let mut entry32 = None;
+    let (mut lo, mut hi) = (u64::MAX, 0u64);
 
     for i in 0..phnum {
         let ph = &img[phoff + i * phentsize..];
@@ -44,6 +53,8 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<u32> {
                     .ok_or_else(|| io::Error::other("PT_LOAD outside guest memory"))?
                     .fill(0);
                 mem[paddr..paddr + filesz].copy_from_slice(&img[off..off + filesz]);
+                lo = lo.min(paddr as u64);
+                hi = hi.max((paddr + memsz) as u64);
             }
             PT_NOTE => {
                 let mut p = off;
@@ -62,5 +73,9 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<u32> {
             _ => {}
         }
     }
-    entry32.ok_or_else(|| io::Error::other("no PVH PHYS32_ENTRY note"))
+    Ok(Loaded {
+        entry: entry32.ok_or_else(|| io::Error::other("no PVH PHYS32_ENTRY note"))?,
+        lo: lo & !0xfff,
+        hi: hi.next_multiple_of(0x1000),
+    })
 }

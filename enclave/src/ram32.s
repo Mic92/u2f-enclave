@@ -1,7 +1,13 @@
 /* 32-bit PVH entry → long mode. Runs with paging off, flat 4 GiB segments,
- * %ebx = hvm_start_info (ignored for now). Identity-maps [0, 4 GiB) with four
- * 1 GiB pages so virtio-mmio at 0xfeb00000 is reachable, enables PAE+LME+PG,
- * loads a 64-bit GDT and far-jumps into Rust.
+ * %ebx = hvm_start_info (ignored), %esi = SEV C-bit position from the vmm
+ * (0 = not SEV; the guest cannot safely probe this itself: rdmsr SEV_STATUS
+ * #GPs on non-SEV silicon and CPUID #VCs under SEV-ES). A lying vmm just
+ * crashes the guest either way — fail-closed.
+ *
+ * Identity-maps [0, 4 GiB) with four 1 GiB pages, enables PAE+LME+PG, loads
+ * a 64-bit GDT and far-jumps into Rust. With SEV active the leaf PTEs get
+ * the C-bit so code/data stay private; the page-table *walk* is always
+ * encrypted regardless (APM Vol 2 §15.34.5).
  *
  * Derived from cloud-hypervisor/rust-hypervisor-firmware (Apache-2.0). */
 
@@ -18,6 +24,20 @@ ram32_start:
     movl $0x80000083, (PDPT+16)
     movl $0xC0000083, (PDPT+24)
     movl $PDPT, %eax; orb $0b11, %al; movl %eax, (PML4)
+
+    /* %esi = C-bit position (>= 32 on all SNP parts); set it in each leaf
+     * PTE's high dword. Intermediate entries don't need it. */
+    testl %esi, %esi
+    jz   1f
+    movl %esi, %ecx
+    subl $32, %ecx
+    movl $1, %eax
+    shll %cl, %eax
+    orl  %eax, (PDPT+4)
+    orl  %eax, (PDPT+12)
+    orl  %eax, (PDPT+20)
+    orl  %eax, (PDPT+28)
+1:
 
     movl $PML4, %eax
     movl %eax, %cr3
@@ -41,4 +61,5 @@ ram32_start:
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %ss
+    movl %esi, %edi               /* SysV arg0 = c_bit */
     ljmpl $0x08, $rust64_start

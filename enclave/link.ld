@@ -20,7 +20,9 @@ SECTIONS
   .data   : ALIGN(16) { *(.data .data.*) *(.got .got.*) }
   .bss    : ALIGN(4096) { *(.bss .bss.*) *(COMMON) }
 
-  .stack (NOLOAD) : ALIGN(4096) { stack_start = .; . += 32K; stack_end = .; }
+  /* In :ram (not NOLOAD) so PT_LOAD.memsz covers it and the SNP launch
+     measures/validates these pages along with .bss. */
+  .stack  : ALIGN(4096) { stack_start = .; . += 32K; stack_end = .; } :ram
 
   /DISCARD/ : { *(.eh_frame*) *(.comment) }
 }

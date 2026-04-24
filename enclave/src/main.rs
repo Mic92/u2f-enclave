@@ -19,6 +19,7 @@ use linked_list_allocator::LockedHeap;
 mod boot;
 mod platform;
 mod serial;
+mod sev;
 mod virtio;
 mod vsock;
 
@@ -30,10 +31,20 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
 static ALLOC: LockedHeap = LockedHeap::empty();
 
-/// 64-bit entry, far-jumped to from `ram32.s` with a valid stack and
-/// [0, 4 GiB) identity-mapped.
+/// 64-bit entry, far-jumped to from `ram32.s` with a valid stack,
+/// [0, 4 GiB) identity-mapped, and `c_bit` = SEV C-bit position the vmm
+/// passed in `%esi` (0 ⇒ plain VM).
 #[no_mangle]
-pub extern "C" fn rust64_start() -> ! {
+pub extern "C" fn rust64_start(c_bit: u32) -> ! {
+    if c_bit != 0 {
+        // Reaching here under SEV-ES with the C-bit applied means the
+        // encrypted launch + page-table setup worked. There is no `#VC`
+        // handler yet, so any IOIO/MMIO would triple-fault; bow out via the
+        // GHCB MSR protocol with a marker the vmm/e2e can check.
+        let _ = sev::status(); // sanity: non-interceptable; #GP if vmm lied
+        sev::terminate(sev::TERM_BOOT_OK);
+    }
+
     // SAFETY: single-threaded, runs once before any allocation.
     unsafe {
         ALLOC.lock().init(addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);

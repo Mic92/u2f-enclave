@@ -17,6 +17,7 @@ use std::os::fd::AsRawFd;
 mod elf;
 mod kvm;
 mod mmio;
+mod snp;
 mod vhost;
 
 const MEM_SIZE: usize = 8 * 1024 * 1024;
@@ -26,9 +27,11 @@ const DEBUG_EXIT: u16 = 0xf4;
 static ENCLAVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/enclave"));
 
 fn main() -> io::Result<()> {
-    let cid: u64 = std::env::args()
-        .nth(1)
-        .map(|s| s.parse().expect("usage: vmm [guest-cid]"))
+    let mut args = std::env::args().skip(1).peekable();
+    let snp = args.next_if_eq("--snp").is_some();
+    let cid: u64 = args
+        .next()
+        .map(|s| s.parse().expect("usage: vmm [--snp] [guest-cid]"))
         .unwrap_or(42);
 
     let kvm = std::fs::OpenOptions::new()
@@ -39,7 +42,8 @@ fn main() -> io::Result<()> {
     if api != 12 {
         return Err(io::Error::other("KVM API != 12"));
     }
-    let vm = kvm::ioctl_fd(&kvm, kvm::KVM_CREATE_VM, 0)?;
+    let vm_type = if snp { kvm::KVM_X86_SNP_VM } else { 0 };
+    let vm = kvm::ioctl_fd(&kvm, kvm::KVM_CREATE_VM, vm_type)?;
 
     let mem = unsafe {
         libc::mmap(
@@ -56,24 +60,35 @@ fn main() -> io::Result<()> {
     }
     let mem_slice = unsafe { std::slice::from_raw_parts_mut(mem as *mut u8, MEM_SIZE) };
 
-    let mut region = kvm::UserMemRegion {
-        slot: 0,
-        flags: 0,
-        guest_phys_addr: 0,
-        memory_size: MEM_SIZE as u64,
-        userspace_addr: mem as u64,
+    // SNP: SEV_INIT2 must precede vCPU creation; sets up guest_memfd-backed
+    // memslot and marks all of guest RAM private. Non-SNP: plain memslot.
+    let snp = if snp {
+        Some(snp::Snp::init(&vm, mem as *mut u8, MEM_SIZE as u64)?)
+    } else {
+        let mut region = kvm::UserMemRegion {
+            slot: 0,
+            flags: 0,
+            guest_phys_addr: 0,
+            memory_size: MEM_SIZE as u64,
+            userspace_addr: mem as u64,
+        };
+        kvm::ioctl_ref(&vm, kvm::KVM_SET_USER_MEMORY_REGION, &mut region)?;
+        None
     };
-    kvm::ioctl_ref(&vm, kvm::KVM_SET_USER_MEMORY_REGION, &mut region)?;
 
-    let entry = elf::load(ENCLAVE, mem_slice)?;
+    let img = elf::load(ENCLAVE, mem_slice)?;
 
-    // vhost owns the data path; if /dev/vhost-vsock is unavailable we still
-    // boot so the no-vsock path can be exercised.
-    let mut vsock = match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
-        Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
-        Err(e) => {
-            eprintln!("vmm: vhost-vsock unavailable ({e}), continuing without");
-            None
+    // No vsock under SNP yet: virtqueues need shared pages and the guest has
+    // no `#VC` handler for the MMIO config window.
+    let mut vsock = if snp.is_some() {
+        None
+    } else {
+        match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
+            Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
+            Err(e) => {
+                eprintln!("vmm: vhost-vsock unavailable ({e}), continuing without");
+                None
+            }
         }
     };
 
@@ -95,7 +110,22 @@ fn main() -> io::Result<()> {
     let run_hdr = run as *mut kvm::RunHdr;
 
     kvm::passthrough_cpuid(&kvm, &vcpu)?;
-    setup_pvh_cpu(&vcpu, entry)?;
+    let c_bit = if snp.is_some() { snp::host_c_bit() } else { 0 };
+    setup_pvh_cpu(&vcpu, img.entry, c_bit)?;
+
+    if let Some(s) = &snp {
+        // After SET_{REGS,SREGS}: KVM snapshots them into the VMSA at FINISH.
+        s.launch(
+            &vm,
+            unsafe { (mem as *const u8).add(img.lo as usize) },
+            img.lo,
+            img.hi - img.lo,
+        )?;
+        eprintln!(
+            "vmm: SEV-SNP launch ok (c-bit={c_bit}, {} KiB measured)",
+            (img.hi - img.lo) >> 10
+        );
+    }
 
     if vsock.is_some() {
         spawn_bridge(cid as u32);
@@ -145,6 +175,16 @@ fn main() -> io::Result<()> {
                     m.data = [0xff; 8];
                 }
             }
+            kvm::EXIT_SYSTEM_EVENT => {
+                let ev = unsafe { hdr.u.system_event };
+                if ev.type_ == kvm::SYSTEM_EVENT_SEV_TERM {
+                    let ghcb = ev.data[0];
+                    let reason = (ghcb >> 16) & 0xff;
+                    eprintln!("vmm: SEV terminate ghcb={ghcb:#x} reason={reason:#x}");
+                    std::process::exit(reason as i32);
+                }
+                return Err(io::Error::other(format!("system event {}", ev.type_)));
+            }
             kvm::EXIT_HLT => return Ok(()),
             kvm::EXIT_SHUTDOWN => return Err(io::Error::other("guest triple-fault")),
             r => return Err(io::Error::other(format!("kvm exit {r}"))),
@@ -175,7 +215,7 @@ fn spawn_bridge(cid: u32) {
 /// PVH initial state per `xen/include/public/arch-x86/hvm/start_info.h`:
 /// flat 4 GiB segments, CR0.PE only, EBX = start_info (we pass 0; the guest
 /// ignores it).
-fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32) -> io::Result<()> {
+fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32, c_bit: u32) -> io::Result<()> {
     // GET first so reserved/KVM-populated fields (apic_base, tr) stay sane.
     let mut sr: kvm::Sregs = unsafe { std::mem::zeroed() };
     kvm::ioctl_ref(vcpu, kvm::KVM_GET_SREGS, &mut sr)?;
@@ -214,6 +254,8 @@ fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32) -> io::Result<()> {
     let mut regs = kvm::Regs {
         rip: entry as u64,
         rflags: 2,
+        // ram32.s reads %esi: SEV C-bit position, 0 = plain VM.
+        rsi: c_bit as u64,
         ..Default::default()
     };
     kvm::ioctl_ref(vcpu, kvm::KVM_SET_REGS, &mut regs)

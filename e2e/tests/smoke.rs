@@ -13,6 +13,28 @@ fn libfido2_sim() {
     fido2_roundtrip(&be.hidraw);
 }
 
+/// SEV-SNP encrypted launch end-to-end: own VMM, no firmware. The guest
+/// reaches 64-bit Rust through the C-bit page tables and reports back via
+/// the GHCB MSR terminate request — no `#VC` handler needed yet.
+#[test]
+fn snp_boot() {
+    let _g = serial_guard();
+    if !need_writable("/dev/kvm") || !need_writable("/dev/sev") {
+        return;
+    }
+    let out = Command::new(host_bin("vmm"))
+        .arg("--snp")
+        .output()
+        .expect("spawn vmm");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // 0x77 = sev::TERM_BOOT_OK from the guest.
+    assert!(
+        out.status.code() == Some(0x77) && stderr.contains("SEV-SNP launch ok"),
+        "status={:?}\nstderr: {stderr}",
+        out.status
+    );
+}
+
 /// The actual deployable: single binary, embedded guest, own KVM launcher,
 /// own vhost-vsock backend, own uhid bridge. No QEMU, no firmware.
 #[test]
