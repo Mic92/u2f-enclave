@@ -56,22 +56,22 @@ fn libfido2_vmm_snp() {
         eprintln!("snp: VCEK signature ok");
     }
 
-    // Second launch: assert the measurement is byte-identical. That plus the
-    // PSP's deterministic KDF is the credential-persistence guarantee, and it
-    // sidesteps reproducing KVM's VMSA byte-for-byte.
+    // Second launch: same measurement (sidesteps reproducing KVM's VMSA),
+    // and — the direct check — launch-1's credId still resolves, i.e. the
+    // PSP-derived master key is in fact stable.
     drop(be);
     let be = vmm_backend(true);
     let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");
-    let rep2 = snp::Report(&rep2);
     assert_eq!(
-        rep2.measurement(),
+        snp::Report(&rep2).measurement(),
         m1,
         "measurement not stable across launches"
     );
-    if let Some(vcek) = &vcek {
-        snp::verify_signature(&rep2, vcek);
-    }
-    fido2_roundtrip(&be.hidraw);
+    assert_eq!(
+        snp::get_assertion(&be.hidraw, &cdh, "example.org", snp::cred_id(&ad)),
+        0,
+        "launch-1 credential did not resolve after relaunch"
+    );
 }
 
 fn hex(b: &[u8]) -> String {

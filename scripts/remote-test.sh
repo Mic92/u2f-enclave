@@ -26,7 +26,11 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # pay one jump-host round-trip and one auth handshake per script run.
 CTL="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-u2fenc-%C"
 # shellcheck disable=SC2206
-SSH=(ssh -o ControlMaster=auto -o "ControlPath=${CTL}" -o ControlPersist=10m ${U2FE_SSH})
+SSH=(ssh -o ControlMaster=auto -o "ControlPath=${CTL}" -o ControlPersist=30s ${U2FE_SSH})
+# A previous run's master may be in a bad state (e.g. socket rm'd while the
+# process lives) → "Connection closed by UNKNOWN port 65535". Tear it down.
+"${SSH[@]}" -O exit "${U2FE_HOST}" 2>/dev/null || true
+trap '"${SSH[@]}" -O exit "${U2FE_HOST}" 2>/dev/null || true' EXIT
 
 echo ">> sync ${ROOT} -> ${U2FE_HOST}:${U2FE_DIR}"
 rsync -az --delete --info=stats1 \

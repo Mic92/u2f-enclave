@@ -143,6 +143,34 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
     (auth_data, snp)
 }
 
+/// Issue a `getAssertion` for `cred_id`; returns the CTAP2 status byte.
+/// `OK` here proves the authenticator's master key re-derived the same
+/// signing key — the direct persistence test.
+pub fn get_assertion(dev: &Path, cdh: &[u8; 32], rp: &str, cred_id: &[u8]) -> u8 {
+    use ctap::cbor::Writer;
+    let mut w = Writer::new();
+    w.map(3);
+    w.unsigned(1);
+    w.text(rp);
+    w.unsigned(2);
+    w.bytes(cdh);
+    w.unsigned(3);
+    w.array(1);
+    w.map(2);
+    w.text("id");
+    w.bytes(cred_id);
+    w.text("type");
+    w.text("public-key");
+    let mut req = vec![ctap::ctap2::CMD_GET_ASSERTION];
+    req.extend(w.into_vec());
+    Hid::open(dev).xact(hid::CTAPHID_CBOR, &req)[0]
+}
+
+pub fn cred_id(auth_data: &[u8]) -> &[u8] {
+    let n = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
+    &auth_data[55..55 + n]
+}
+
 /// Relying-party check: the report's `report_data` is the SHA-512 of the
 /// exact bytes the credential signature covers, so a valid report binds the
 /// PSP-measured guest to this credential's public key.
