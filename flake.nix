@@ -20,14 +20,11 @@
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              rustc
               cargo
+              rustc
               rustfmt
               clippy
-              rust-analyzer
-              cargo-watch
             ];
-            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };
         }
       );
