@@ -215,7 +215,7 @@ fn sev_op<T>(vm: &OwnedFd, sev: &OwnedFd, id: u32, data: &mut T) -> io::Result<(
 }
 
 /// CPUID 0x8000_001f EBX[5:0] on the host. The guest can't safely query this
-/// itself before `#VC` is up, so we pass it in as the boot hint.
+/// itself before the GHCB is up, so we pass it in as the boot hint.
 pub fn host_c_bit() -> u32 {
     std::arch::x86_64::__cpuid(0x8000_001f).ebx & 0x3f
 }

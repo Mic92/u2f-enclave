@@ -44,7 +44,8 @@ const IOIO_IN: u64 = 1;
 const IOIO_D8: u64 = 1 << 4;
 const IOIO_D32: u64 = 1 << 6;
 
-/// Reason code we report on a clean step-2 boot.
+/// Anything ≤0x07 in reason-set 0 is a spec-defined failure, so pick a
+/// value that can't be mistaken for one.
 pub const TERM_BOOT_OK: u8 = 0x77;
 const TERM_FATAL: u8 = 0x7f;
 
@@ -109,7 +110,6 @@ fn pvalidate(va: u64, validate: bool) -> u32 {
     rc as u32
 }
 
-/// One MSR-protocol round trip.
 fn msr_proto(req: u64) -> u64 {
     wrmsr(MSR_GHCB, req);
     vmgexit();

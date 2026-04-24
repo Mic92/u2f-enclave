@@ -74,8 +74,8 @@ fn main() -> io::Result<()> {
 
     let img = elf::load(ENCLAVE, mem_slice)?;
 
-    // No vsock under SNP yet: virtqueues need shared pages and the guest has
-    // no `#VC` handler for the MMIO config window.
+    // No vsock under SNP yet: virtqueue rings need shared pages and the
+    // guest's virtio-mmio accesses need the GHCB-MMIO path.
     let mut vsock = if snp.is_some() {
         None
     } else {

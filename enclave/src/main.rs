@@ -49,8 +49,8 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     serial::print("u2f-enclave: boot\n");
     if sev::active() {
         serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
-        // No vsock yet under SNP (rings need shared pages, MMIO needs GHCB);
-        // the serial line above is the e2e step-2 proof.
+        // vsock under SNP is not wired yet (rings need shared pages and
+        // virtio-mmio needs the GHCB-MMIO path).
         sev::terminate(sev::TERM_BOOT_OK);
     }
 
