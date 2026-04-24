@@ -55,8 +55,17 @@ fn libfido2_vmm_snp() {
         eprintln!("snp: VCEK signature ok");
     }
 
-    // Second launch: same measurement (sidesteps reproducing KVM's VMSA),
-    // and — the direct check — launch-1's credId still resolves, i.e. the
+    // Offline predictor: if this disagrees, KVM changed how it builds the
+    // VMSA (or we changed setup_pvh_cpu) and measure.rs needs updating.
+    let pred = run(Command::new(host_bin("vmm")).arg("--measure"));
+    assert_eq!(
+        String::from_utf8(pred.stdout).unwrap().trim(),
+        snp::hex(&m1),
+        "offline measurement predictor disagrees with PSP"
+    );
+    eprintln!("snp: offline measurement matches");
+
+    // Second launch: launch-1's credId still resolves, i.e. the
     // PSP-derived master key is in fact stable.
     drop(be);
     let be = vmm_backend(true);

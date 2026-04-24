@@ -50,12 +50,10 @@ allow-list → done; the credential is bound to a genuine PSP-measured copy of
 this binary. The master secret is the PSP-**derived key** with
 `guest_field_select = policy|measurement`, so the same binary on the same
 silicon yields the same key and credentials survive restarts with no
-sealed-storage protocol. `e2e::libfido2_vmm_snp` exercises every step,
-including a relaunch + cross-launch `getAssertion`.
-
-The one piece not in-tree: an offline tool that recomputes the expected
-`measurement` from the ELF + a VMSA template (KVM-version-specific; see
-`enclave/DESIGN.md`). Until then the allow-list is trust-on-first-use.
+sealed-storage protocol. `vmm --measure` recomputes the expected digest
+offline (no EPYC needed) so the allow-list can be derived from source.
+`e2e::libfido2_vmm_snp` exercises every step — binding, VCEK signature,
+predictor-vs-PSP equality, and cross-launch `getAssertion`.
 
 ## Status
 
@@ -65,8 +63,8 @@ The one piece not in-tree: an offline tool that recomputes the expected
 - **SEV-SNP** – encrypted+measured launch, paravirt GHCB, virtio over shared
   rings, guest↔PSP messaging. ~145 KB text, 492 KB measured launch image.
 - **Attestation** – report in `attStmt`, VCEK signature verified, measurement
-  stable across launches, master key persists.
-- **Next** – offline measurement tool; resident keys / `clientPIN`; TDX.
+  stable and offline-recomputable, master key persists.
+- **Next** – resident keys / `clientPIN`; TDX.
 
 ## Try it
 

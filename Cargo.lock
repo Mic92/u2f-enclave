@@ -961,6 +961,7 @@ version = "0.0.1"
 dependencies = [
  "bridge",
  "libc",
+ "sha2",
  "vsock",
 ]
 

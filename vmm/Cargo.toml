@@ -8,3 +8,4 @@ license.workspace = true
 libc = "0.2"
 bridge = { path = "../bridge" }
 vsock = "0.5"
+sha2 = "0.10"

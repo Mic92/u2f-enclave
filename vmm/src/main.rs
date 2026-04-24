@@ -13,6 +13,7 @@ use std::os::fd::AsRawFd;
 
 mod elf;
 mod kvm;
+mod measure;
 mod mmio;
 mod snp;
 mod vhost;
@@ -25,6 +26,9 @@ static ENCLAVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/enclave"));
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1).peekable();
+    if args.next_if_eq("--measure").is_some() {
+        return print_measure(args.next());
+    }
     let snp = args.next_if_eq("--snp").is_some();
     let cid: u64 = args
         .next()
@@ -224,6 +228,24 @@ fn spawn_bridge(cid: u32) {
             std::process::exit(1);
         }
     });
+}
+
+/// Recompute the launch measurement from the embedded ELF and print it. The
+/// only environmental input is the C-bit position; default to the host's so
+/// `vmm --measure` on the launching machine matches `vmm --snp` on it.
+fn print_measure(c_bit: Option<String>) -> io::Result<()> {
+    let c_bit: u32 = c_bit
+        .map(|s| s.parse().expect("usage: vmm --measure [c-bit]"))
+        .unwrap_or_else(snp::host_c_bit);
+    let mut mem = vec![0u8; MEM_SIZE];
+    let img = elf::load(ENCLAVE, &mut mem)?;
+    let vmsa = measure::vmsa_page(img.entry, c_bit);
+    let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
+    for b in ld {
+        print!("{b:02x}");
+    }
+    println!();
+    Ok(())
 }
 
 /// PVH initial state per `xen/include/public/arch-x86/hvm/start_info.h`:
