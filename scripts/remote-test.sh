@@ -50,7 +50,9 @@ rsync -az --delete --info=stats1 \
 "${SSH[@]}" "${U2FE_HOST}" "
   set -euo pipefail
   cd $(printf %q "${U2FE_DIR}")
-  sudo -n setfacl -m u:\$(id -un):rw /dev/uhid /dev/sev /dev/vhost-vsock
+  for d in /dev/uhid /dev/vhost-vsock /dev/sev; do
+    [[ -e \$d ]] && sudo -n setfacl -m u:\$(id -un):rw \$d
+  done
   sudo -n bash -c '
     while :; do
       for h in /sys/class/hidraw/hidraw*; do
