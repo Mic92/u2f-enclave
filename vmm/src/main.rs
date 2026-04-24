@@ -177,9 +177,11 @@ fn main() -> io::Result<()> {
                 let hc = unsafe { &mut hdr.u.hypercall };
                 if hc.nr == kvm::KVM_HC_MAP_GPA_RANGE {
                     let private = hc.args[2] & (1 << 4) != 0;
+                    // args[2][1:0] = page-size order in 9-bit steps (4K/2M/1G).
+                    let pg = 12 + 9 * (hc.args[2] & 3);
                     let mut attrs = kvm::MemAttrs {
                         address: hc.args[0],
-                        size: hc.args[1] << 12,
+                        size: hc.args[1] << pg,
                         attributes: if private {
                             kvm::KVM_MEMORY_ATTRIBUTE_PRIVATE
                         } else {
