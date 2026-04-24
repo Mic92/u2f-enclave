@@ -103,36 +103,19 @@ laptop$ echo $?
 ```
 
 `verify` fetches the VCEK from AMD and checks the signature (check 2),
-and checks the measurement against the binary it's part of (check 3).
-See [How attestation works](#how-attestation-works) for what each check
-proves and how a real relying party does the same with a browser-posted
-`attestationObject` instead of `attest`.
+then recomputes the expected measurement from the guest image embedded
+in itself and compares (check 3). Exit status 0 means: this report came
+from genuine AMD silicon running the exact guest this binary would
+launch.
 
-(If you just want to see all three checks light up on one box:
-`u2f-enclave attest | u2f-enclave verify`.)
-
-### For relying parties
-
-```console
-$ u2f-enclave --measure
-70eabebbf79908ce762df385e22606ee97496e923305fd3fdff0f651309bf3dd463427edaa43dfa6092a1d365c6b6a8a
-↑ expected SEV-SNP launch measurement for this build.
-  An attStmt["snp"] report from `u2f-enclave --snp` carries this at
-  bytes 0x90..0xc0; check it after verifying the VCEK signature.
-inputs:
-  guest image  0x100000..0x17b000 (492 KiB, 123 pages)
-  entry        0x1000c8
-  secrets gpa  0x1000
-  vmsa gpa     0xfffffffff000
-  c-bit        51
-(also check report.policy == 0x30000; not part of this digest)
-```
-
-No AMD hardware required, no arguments — every input is fixed by the
-binary. Run it in CI next to a reproducible build and you have the
-allow-list value. The hex digest goes to stdout alone, so
-`expected=$(u2f-enclave --measure)` works. See
-[How attestation works](#how-attestation-works) for what to do with it.
+That's the whole loop. In a real deployment `attest` is replaced by a
+browser posting an `attestationObject` to your server —
+[How attestation works](#how-attestation-works) shows that variant and
+what each check actually proves. If you'd rather embed the expected
+measurement in your own verifier instead of shelling out,
+`u2f-enclave --measure` prints just the hex digest (it's a pure function
+of the binary, so you can pin it from CI). On one box,
+`u2f-enclave attest | u2f-enclave verify` runs the lot.
 
 Run `u2f-enclave --help` for the rest.
 
