@@ -1,6 +1,6 @@
 //! Shared harness for the end-to-end smoke tests.
 //!
-//! These tests drive real external programs (qemu, libfido2, OpenSSH) against
+//! These tests drive real external programs (libfido2, OpenSSH) against
 //! the workspace binaries, so they need `/dev/uhid` and `/dev/vhost-vsock`
 //! and cannot run in a sandboxed builder. Each test takes [`serial_guard`]
 //! because they all share one uhid device name and one vsock CID.
@@ -147,7 +147,7 @@ fn find_hidraw() -> PathBuf {
 }
 
 /// Kill-on-drop child set. Constructors push as they spawn so a panic during
-/// bring-up (e.g. `find_hidraw` timing out) does not leak qemu holding the
+/// bring-up (e.g. `find_hidraw` timing out) does not leak the vmm holding the
 /// vsock CID.
 #[derive(Default)]
 pub struct Procs(Vec<Child>);

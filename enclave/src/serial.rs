@@ -1,7 +1,7 @@
 //! 16550 UART on the legacy COM1 port for bring-up logging.
 //!
 //! Under SEV-ES/SNP every `in`/`out` raises `#VC`; until the GHCB IOIO path
-//! is wired this only produces output on plain (non-confidential) QEMU. That
+//! is wired this only produces output under the plain (non-SEV) vmm. That
 //! is exactly what early bring-up needs.
 
 use core::arch::asm;

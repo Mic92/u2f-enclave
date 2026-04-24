@@ -8,7 +8,8 @@
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, Ordering};
 
-/// QEMU `microvm` first virtio-mmio slot (`include/hw/i386/microvm.h`).
+/// Where `vmm` places the single virtio-mmio window (and where QEMU microvm
+/// happens to put slot 0 too, which is why we picked it).
 pub const MMIO_BASE: usize = 0xfeb0_0000;
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;

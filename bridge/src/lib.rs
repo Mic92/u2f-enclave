@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-pub mod uhid;
+mod uhid;
 
 const REPORT_SIZE: usize = 64;
 

@@ -43,7 +43,7 @@ pub extern "C" fn rust64_start() -> ! {
 
     let Some(vs) = vsock::init(VSOCK_PORT) else {
         serial::print("u2f-enclave: no vsock, halt\n");
-        qemu_exit(0);
+        debug_exit(0);
     };
     serial::print("u2f-enclave: vsock cid=");
     serial::print_u32(vs.cid() as u32);
@@ -61,9 +61,10 @@ pub extern "C" fn rust64_start() -> ! {
     }
 }
 
-/// Exit QEMU via `isa-debug-exit`; falls back to `hlt` on real hardware.
-/// QEMU's exit status is `(code << 1) | 1`, so 0 → 1, anything else → odd>1.
-fn qemu_exit(code: u32) -> ! {
+/// Signal exit via the isa-debug-exit port; the vmm turns this into a
+/// process exit code of `(code << 1) | 1`. Falls back to `hlt` if nobody is
+/// listening.
+fn debug_exit(code: u32) -> ! {
     unsafe { asm!("out dx, eax", in("dx") 0xf4u16, in("eax") code) };
     loop {
         unsafe { asm!("hlt", options(nomem, nostack)) };
@@ -79,5 +80,5 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         serial::print_u32(loc.line());
     }
     serial::print("\n");
-    qemu_exit(0x31);
+    debug_exit(0x31);
 }

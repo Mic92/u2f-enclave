@@ -229,15 +229,13 @@ impl Vsock {
 // far too large for our 32 KiB stack, so it lives in BSS.
 static mut INSTANCE: Vsock = Vsock::empty();
 
-/// Find the vsock device on any of QEMU microvm's MMIO slots and bring it up.
+/// Probe the MMIO slot the vmm sets up and bring the device up.
 pub fn init(port: u32) -> Option<&'static mut Vsock> {
-    let v = unsafe { &mut *addr_of_mut!(INSTANCE) };
-    for slot in 0..32 {
-        let m = unsafe { Mmio::new(MMIO_BASE + slot * 512) };
-        if m.probe() == Some(DEVICE_ID_VSOCK) {
-            v.init(m, port);
-            return Some(v);
-        }
+    let m = unsafe { Mmio::new(MMIO_BASE) };
+    if m.probe() != Some(DEVICE_ID_VSOCK) {
+        return None;
     }
-    None
+    let v = unsafe { &mut *addr_of_mut!(INSTANCE) };
+    v.init(m, port);
+    Some(v)
 }

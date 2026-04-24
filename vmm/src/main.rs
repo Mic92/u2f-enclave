@@ -126,8 +126,6 @@ fn main() -> io::Result<()> {
                     },
                     (DEBUG_EXIT, kvm::IO_OUT) => {
                         let code = unsafe { *(data as *const u32) };
-                        // Match QEMU's isa-debug-exit encoding so callers
-                        // (e2e tests) don't need to special-case the VMM.
                         std::process::exit(((code << 1) | 1) as i32);
                     }
                     (_, kvm::IO_IN) => unsafe { std::ptr::write_bytes(data, 0, n) },
