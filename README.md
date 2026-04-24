@@ -69,26 +69,47 @@ same keys across restarts.
 
 ### See it work
 
-No browser needed — the binary can play both client and verifier:
+The point of attestation is that the **verifier doesn't trust the
+authenticator's host** — so produce the report on the SNP machine, then
+check it somewhere else.
+
+On the SNP host (where `u2f-enclave --snp` is running):
 
 ```console
-$ u2f-enclave attest | u2f-enclave verify
+snp-host$ u2f-enclave attest > report.bin
 attest: using /dev/hidraw3
 attest: report_data == SHA-512(authData||cdh)
+attest: cred_id      5e48c479276d74f3…
+```
+
+`attest` is a stand-in for a browser/SSH client: it registers a
+credential over hidraw, checks the report binds it (check 1), and writes
+the 1184-byte report to stdout.
+
+Copy `report.bin` to any other Linux box with the same `u2f-enclave`
+binary — your laptop, CI, the RP's server. No AMD hardware, no
+`/dev/kvm`:
+
+```console
+laptop$ u2f-enclave verify < report.bin
 report_data   6f020c9e5d1731ca…
 measurement   70eabebbf79908ce…  ok
 policy        0x30000  ok
 chip_id       f59a25d8302ed76a
 reported_tcb  0x581b00000000000a
 vcek_sig      ok
+laptop$ echo $?
+0
 ```
 
-`attest` registers a credential over hidraw, checks the report binds it
-(check 1), and writes the 1184-byte report to stdout. `verify` checks the
-VCEK signature (check 2) and the measurement against this build (check 3).
+`verify` fetches the VCEK from AMD and checks the signature (check 2),
+and checks the measurement against the binary it's part of (check 3).
 See [How attestation works](#how-attestation-works) for what each check
-means and how a real relying party does the same from a browser
-registration.
+proves and how a real relying party does the same with a browser-posted
+`attestationObject` instead of `attest`.
+
+(If you just want to see all three checks light up on one box:
+`u2f-enclave attest | u2f-enclave verify`.)
 
 ### For relying parties
 

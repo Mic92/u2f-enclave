@@ -39,11 +39,11 @@ Usage:
                                      measurement matches this build; print
                                      report_data for the caller's binding
                                      check; exit 0 iff ok
-  u2f-enclave attest [DEVICE]        register a credential against the local
-                                     hidraw device, check report_data binds
-                                     it, write the report to stdout. Pipe
-                                     into `verify` for the full demo:
-                                       u2f-enclave attest | u2f-enclave verify
+  u2f-enclave attest [DEVICE]        demo client: register a credential on
+                                     the local hidraw device, check the
+                                     report binds it, write the 1184-byte
+                                     report to stdout (e.g. > report.bin,
+                                     then `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
