@@ -40,7 +40,6 @@
             packages = [
               rust
               pkgs.libfido2 # smoke-libfido2.sh
-              pkgs.qemu # boot enclave
             ];
           };
         }

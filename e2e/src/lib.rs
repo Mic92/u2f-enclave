@@ -11,9 +11,6 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
-const VSOCK_CID: u32 = 42;
-const VSOCK_PORT: u32 = 5555;
-
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// Tests share `/dev/uhid` (single device name) and the vsock CID, so they
@@ -48,6 +45,7 @@ fn cargo(args: &[&str]) {
 
 pub fn host_bin(name: &str) -> PathBuf {
     static ONCE: Once = Once::new();
+    // vmm's build.rs cross-builds and embeds the enclave ELF.
     ONCE.call_once(|| {
         cargo(&[
             "build",
@@ -61,21 +59,6 @@ pub fn host_bin(name: &str) -> PathBuf {
         ])
     });
     target_dir().join("release").join(name)
-}
-
-pub fn enclave_elf() -> PathBuf {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        cargo(&[
-            "build",
-            "--release",
-            "-p",
-            "enclave",
-            "--target",
-            "x86_64-unknown-none",
-        ])
-    });
-    target_dir().join("x86_64-unknown-none/release/enclave")
 }
 
 /// Per-test scratch dir under `$XDG_RUNTIME_DIR`; removed on drop.
@@ -138,15 +121,6 @@ pub fn which(bin: &str) -> PathBuf {
         .map(|d| Path::new(d).join(bin))
         .find(|p| p.is_file())
         .unwrap_or_else(|| panic!("{bin} not in PATH"))
-}
-
-fn qboot_rom() -> PathBuf {
-    let qemu = fs::canonicalize(which("qemu-system-x86_64")).unwrap();
-    qemu.parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("share/qemu/qboot.rom"))
-        .filter(|p| p.is_file())
-        .expect("qboot.rom next to qemu")
 }
 
 fn find_hidraw() -> PathBuf {
@@ -219,25 +193,10 @@ pub fn sim_backend() -> Backend {
     }
 }
 
-pub fn kernel_backend() -> Backend {
-    let tmp = Tmp::new("kern");
+pub fn vmm_backend() -> Backend {
+    let tmp = Tmp::new("vmm");
     let mut procs = Procs::default();
-    procs.spawn(
-        Command::new("qemu-system-x86_64")
-            .args(["-M", "microvm,pic=off,pit=off,rtc=off,ioapic2=off"])
-            .args(["-cpu", "max", "-m", "8M", "-nographic", "-no-reboot"])
-            .arg("-bios")
-            .arg(qboot_rom())
-            .args(["-global", "virtio-mmio.force-legacy=false"])
-            .args([
-                "-device",
-                &format!("vhost-vsock-device,guest-cid={VSOCK_CID}"),
-            ])
-            .arg("-kernel")
-            .arg(enclave_elf()),
-    );
-    std::thread::sleep(Duration::from_millis(500));
-    procs.spawn(Command::new(host_bin("bridge")).arg(format!("vsock:{VSOCK_CID}:{VSOCK_PORT}")));
+    procs.spawn(Command::new(host_bin("vmm")).arg("42"));
     Backend {
         hidraw: find_hidraw(),
         procs,

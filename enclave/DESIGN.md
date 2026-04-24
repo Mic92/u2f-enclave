@@ -4,12 +4,11 @@ The `ctap` crate links into a ~27 KB stripped `x86_64-unknown-none` ELF with a
 heap, panic handler and RDRAND-backed `Platform`. What remains is boot glue
 and two drivers. Everything below is additive on top of `src/main.rs`.
 
-## Stage 1 — boot under plain QEMU (no SEV) — **done**
+## Stage 1 — PVH boot — **done**
 
-PVH ELF note + 32→64-bit trampoline (`ram32.s`) + linker script at 1 MiB +
-one 2 MiB identity page. `e2e::boot_pvh` builds, boots under
-`qemu -kernel`, checks the serial banner, and asserts the
-`isa-debug-exit` status. Pattern lifted from
+PVH ELF note + 32→64-bit trampoline (`ram32.s`) + linker script at 1 MiB.
+The `vmm` crate's hand-rolled KVM launcher places the vCPU directly in PVH
+initial state — no SeaBIOS/qboot in the path. Pattern lifted from
 `cloud-hypervisor/rust-hypervisor-firmware`.
 
 ## Stage 2 — SEV-SNP enable
@@ -33,17 +32,14 @@ and matches what the relying party pins.
 
 ## Stage 3 — virtio-vsock — **done**
 
-Hand-rolled (no `virtio-drivers` dep): modern virtio-mmio transport + split
-virtqueue + single-connection vsock STREAM, polling, ~450 LoC total.
-`e2e::libfido2_kernel` boots under `qemu -M microvm` with
-`vhost-vsock-device`, `bridge` connects over AF_VSOCK, and the full
-`libfido2` register/attest/assert/verify sequence passes against the
-bare-metal kernel.
+Guest side: hand-rolled modern virtio-mmio transport + split virtqueue +
+single-connection vsock STREAM, polling, ~450 LoC.
 
-QEMU specifics that bit: `-global virtio-mmio.force-legacy=false` (default
-is the v1 register layout), `-bios qboot.rom` (microvm's SeaBIOS doesn't do
-PVH), `ioapic2=off` to cap transports at 8, and the device lands in the
-*last* MMIO slot due to QOM bus assignment order — so we scan.
+Host side: `vmm` emulates the virtio-mmio register window and offloads the
+virtqueues to `/dev/vhost-vsock` so the data path is entirely in-kernel.
+The enclave ELF is `include_bytes!`-embedded; `vmm` runs the uhid bridge
+in-process. `e2e::libfido2_vmm` runs the full `libfido2`
+register/attest/assert/verify sequence against this single binary.
 
 ## Stage 4 — attestation in attStmt
 

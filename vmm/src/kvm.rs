@@ -5,8 +5,11 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const KVMIO: u32 = 0xAE;
+pub const fn ioc_raw(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
+    ((dir << 30) | (size << 16) | (ty << 8) | nr) as libc::c_ulong
+}
 const fn ioc(dir: u32, nr: u32, size: u32) -> libc::c_ulong {
-    ((dir << 30) | (size << 16) | (KVMIO << 8) | nr) as libc::c_ulong
+    ioc_raw(dir, KVMIO, nr, size)
 }
 const fn io(nr: u32) -> libc::c_ulong {
     ioc(0, nr, 0)
@@ -123,9 +126,8 @@ pub struct Sregs {
 }
 const _: () = assert!(std::mem::size_of::<Sregs>() == 312);
 
-/// First 48 bytes of `struct kvm_run`; enough to read `exit_reason` and the
-/// `io` union arm. The full struct is several KiB but we only ever touch this
-/// header plus the data window at `io.data_offset`.
+/// Prefix of `struct kvm_run`; enough to read `exit_reason` and the io/mmio
+/// union arms.
 #[repr(C)]
 pub struct RunHdr {
     pub request_interrupt_window: u8,
@@ -137,8 +139,12 @@ pub struct RunHdr {
     pub flags: u16,
     pub cr8: u64,
     pub apic_base: u64,
-    // union starts here (offset 32)
+    pub u: RunUnion,
+}
+#[repr(C)]
+pub union RunUnion {
     pub io: RunIo,
+    pub mmio: RunMmio,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -148,6 +154,14 @@ pub struct RunIo {
     pub port: u16,
     pub count: u32,
     pub data_offset: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RunMmio {
+    pub phys_addr: u64,
+    pub data: [u8; 8],
+    pub len: u32,
+    pub is_write: u8,
 }
 
 #[repr(C)]

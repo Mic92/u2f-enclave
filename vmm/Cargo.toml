@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
+bridge = { path = "../bridge" }
+vsock = "0.5"

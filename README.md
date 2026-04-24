@@ -29,8 +29,8 @@ minimal TCB rather than a fork of an existing SVSM.
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without SEV-SNP hardware. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. |
-| `vmm`    | std (Linux)       | ~440-line KVM launcher: loads the enclave ELF, drops a vCPU into PVH state, emulates COM1. No firmware blob in the boot path. SEV-SNP launch ioctls and a vhost-vsock backend slot in here. |
-| `enclave`| `no_std`          | The actual unikernel: PVH-boots, hand-rolls virtio-vsock, serves CTAP. See `enclave/DESIGN.md`. |
+| `vmm`    | std (Linux)       | The deployable: single binary that embeds the enclave ELF, launches it under KVM (no firmware), wires its virtqueues to `/dev/vhost-vsock`, and runs the uhid bridge in-process. `./vmm` → `/dev/hidrawN` FIDO2 device. SEV-SNP launch ioctls slot in here. |
+| `enclave`| `no_std`          | The unikernel: PVH-boots, hand-rolls virtio-vsock, serves CTAP. Cross-built and baked into `vmm` by `build.rs`. See `enclave/DESIGN.md`. |
 
 ## Status / milestones
 
@@ -39,11 +39,12 @@ minimal TCB rather than a fork of an existing SVSM.
   stateless non-resident credentials, `fmt:"packed"` self-attestation.
   Verified against two independent stacks: Yubico `libfido2` and OpenSSH
   `sk-ecdsa` keygen+login (`cargo test -p e2e`).
-- **M2 (in progress)** – bare-metal unikernel. PVH boot + hand-rolled
-  virtio-mmio/vsock done: the `e2e::libfido2_kernel` test runs the full
-  `libfido2` register/assert sequence against a ~100 KB `x86_64-unknown-none`
-  ELF over `vhost-vsock`. Remaining: SEV-SNP `#VC`/GHCB + attestation report
-  (needs an EPYC host).
+- **M2 (in progress)** – bare-metal unikernel + own VMM. The ~100 KB
+  `x86_64-unknown-none` guest and a ~700-line KVM launcher with a
+  vhost-vsock virtio-mmio backend are fused into one host binary;
+  `e2e::libfido2_vmm` runs the full `libfido2` round-trip against it.
+  Remaining: SEV-SNP `#VC`/GHCB in the guest and `KVM_SEV_*` launch in the
+  host (needs an EPYC box).
 - **M3** – resident keys, `clientPIN`, TDX.
 
 ## Try it (host simulation)

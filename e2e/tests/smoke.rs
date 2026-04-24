@@ -3,24 +3,6 @@ use std::process::Command;
 
 use e2e::*;
 
-/// PVH boot to 64-bit Rust under our own VMM — no QEMU, no C firmware.
-/// Exercises the hand-rolled ELF/PVH loader, KVM setup, and the enclave's
-/// boot path in one go; only needs `/dev/kvm`.
-#[test]
-fn boot_pvh() {
-    let out = Command::new(host_bin("vmm"))
-        .arg(enclave_elf())
-        .output()
-        .expect("spawn vmm");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("u2f-enclave: no vsock, halt"),
-        "serial: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(out.status.code(), Some(1));
-}
-
 #[test]
 fn libfido2_sim() {
     let _g = serial_guard();
@@ -31,13 +13,18 @@ fn libfido2_sim() {
     fido2_roundtrip(&be.hidraw);
 }
 
+/// The actual deployable: single binary, embedded guest, own KVM launcher,
+/// own vhost-vsock backend, own uhid bridge. No QEMU, no firmware.
 #[test]
-fn libfido2_kernel() {
+fn libfido2_vmm() {
     let _g = serial_guard();
-    if !need_writable("/dev/uhid") || !need_writable("/dev/vhost-vsock") {
+    if !need_writable("/dev/uhid")
+        || !need_writable("/dev/vhost-vsock")
+        || !need_writable("/dev/kvm")
+    {
         return;
     }
-    let be = kernel_backend();
+    let be = vmm_backend();
     fido2_roundtrip(&be.hidraw);
 }
 
