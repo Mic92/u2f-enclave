@@ -80,8 +80,8 @@ inputs:
   entry        0x1000c8
   secrets gpa  0x1000
   vmsa gpa     0xfffffffff000
-  policy       0x30000
   c-bit        51
+(also check report.policy == 0x30000; not part of this digest)
 ```
 
 No AMD hardware required, no arguments — every input is fixed by the

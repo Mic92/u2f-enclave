@@ -47,18 +47,19 @@ fn main() -> io::Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
-    if args.next_if_eq("--measure").is_some() {
-        return print_measure();
-    }
-    let snp = args.next_if_eq("--snp").is_some();
+    let measure = args.next_if_eq("--measure").is_some();
+    let snp = !measure && args.next_if_eq("--snp").is_some();
     let cid: u64 = match args.next().map(|s| s.parse()) {
         None => 42,
-        Some(Ok(n)) => n,
-        Some(Err(_)) => {
+        Some(Ok(n)) if !measure => n,
+        _ => {
             eprint!("{USAGE}");
             std::process::exit(2);
         }
     };
+    if measure {
+        return print_measure();
+    }
 
     let kvm = open_dev("/dev/kvm")?;
     let api = kvm::ioctl(&kvm, kvm::KVM_GET_API_VERSION, 0)?;
@@ -299,8 +300,8 @@ fn print_measure() -> io::Result<()> {
          entry        {:#x}\n  \
          secrets gpa  {:#x}\n  \
          vmsa gpa     {:#x}\n  \
-         policy       {:#x}\n  \
-         c-bit        {}",
+         c-bit        {}\n\
+         (also check report.policy == {:#x}; not part of this digest)",
         img.lo,
         img.hi,
         (img.hi - img.lo) >> 10,
@@ -308,8 +309,8 @@ fn print_measure() -> io::Result<()> {
         img.entry,
         snp::SECRETS_GPA,
         measure::VMSA_GPA,
-        snp::SNP_POLICY,
         snp::C_BIT,
+        snp::SNP_POLICY,
     );
     Ok(())
 }
