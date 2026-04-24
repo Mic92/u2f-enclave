@@ -9,7 +9,7 @@
 //! Refs: SNP firmware ABI §7 (guest messages), §8.14 (secrets page); Linux
 //! `arch/x86/coco/sev/core.c::enc_payload`/`verify_and_dec_payload`.
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile};
+use core::ptr::{addr_of, addr_of_mut, copy_nonoverlapping};
 
 use aes_gcm::aead::AeadInPlace;
 use aes_gcm::{Aes256Gcm, KeyInit};
@@ -51,13 +51,17 @@ static mut SEQNO: u64 = 1;
 pub fn init() {
     // The secrets page is private and PSP-validated at launch; a plain read
     // through the C=1 mapping is correct.
-    let s = SECRETS_GPA as *const u8;
-    let vmpck = unsafe { &mut *addr_of_mut!(VMPCK) };
-    for (i, b) in vmpck.iter_mut().enumerate() {
-        *b = unsafe { read_volatile(s.add(VMPCK0_OFF + i)) };
-    }
+    let s = (SECRETS_GPA + VMPCK0_OFF as u64) as *const u8;
+    unsafe { copy_nonoverlapping(s, addr_of_mut!(VMPCK) as *mut u8, 32) };
     sev::share(addr_of!(REQ) as u64, 4096);
     sev::share(addr_of!(RESP) as u64, 4096);
+}
+
+/// IV = `msg_seqno` zero-extended to 12; AAD = header from `algo` onward.
+fn iv_aad(m: &[u8; 4096]) -> ([u8; 12], [u8; AAD_LEN]) {
+    let mut iv = [0u8; 12];
+    iv[..8].copy_from_slice(&m[32..40]);
+    (iv, m[AAD_OFF..HDR_LEN].try_into().unwrap())
 }
 
 /// One AES-GCM-wrapped round trip to the PSP. On success the decrypted
@@ -65,8 +69,6 @@ pub fn init() {
 fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
     let seq = unsafe { SEQNO };
     let cipher = Aes256Gcm::new(unsafe { &*addr_of!(VMPCK) }.into());
-    let mut iv = [0u8; 12];
-    iv[..8].copy_from_slice(&seq.to_le_bytes());
 
     // Build and encrypt in the *private* staging page so the host never
     // observes plaintext nor a partially-built header.
@@ -82,8 +84,7 @@ fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
     // 56..60 rsvd, 60 vmpck=0, 61..96 rsvd
     m[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
 
-    let mut aad = [0u8; AAD_LEN];
-    aad.copy_from_slice(&m[AAD_OFF..HDR_LEN]);
+    let (iv, aad) = iv_aad(m);
     let tag = cipher
         .encrypt_in_place_detached((&iv).into(), &aad, &mut m[HDR_LEN..HDR_LEN + payload.len()])
         .map_err(|_| ())?;
@@ -96,42 +97,35 @@ fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
     unsafe { SEQNO += 2 };
     unsafe { &mut (*addr_of_mut!(REQ)).0 }.copy_from_slice(m);
 
-    let info2 = sev::guest_request(addr_of!(REQ) as u64, addr_of!(RESP) as u64);
-    if info2 != 0 {
+    if sev::guest_request(addr_of!(REQ) as u64, addr_of!(RESP) as u64) != 0 {
         // Low 32 = PSP firmware error; high 32 = VMM error (e.g. busy).
         return Err(());
     }
 
     // Copy out of shared memory before inspecting anything.
-    let priv_ = unsafe { &mut (*addr_of_mut!(PRIV)).0 };
-    let resp = unsafe { &(*addr_of!(RESP)).0 };
-    priv_.copy_from_slice(resp);
+    m.copy_from_slice(unsafe { &(*addr_of!(RESP)).0 });
 
-    if u64::from_le_bytes(priv_[32..40].try_into().unwrap()) != seq + 1 || priv_[52] != msg_type + 1
+    let sz = u16::from_le_bytes([m[54], m[55]]) as usize;
+    if u64::from_le_bytes(m[32..40].try_into().unwrap()) != seq + 1
+        || m[52] != msg_type + 1
+        || HDR_LEN + sz > 4096
     {
         return Err(());
     }
-    let sz = u16::from_le_bytes([priv_[54], priv_[55]]) as usize;
-    if HDR_LEN + sz > 4096 {
-        return Err(());
-    }
-    let mut iv = [0u8; 12];
-    iv[..8].copy_from_slice(&priv_[32..40]);
-    let mut aad = [0u8; AAD_LEN];
-    aad.copy_from_slice(&priv_[AAD_OFF..HDR_LEN]);
-    let tag: [u8; 16] = priv_[..16].try_into().unwrap();
+    let (iv, aad) = iv_aad(m);
+    let tag: [u8; 16] = m[..16].try_into().unwrap();
     cipher
         .decrypt_in_place_detached(
             (&iv).into(),
             &aad,
-            &mut priv_[HDR_LEN..HDR_LEN + sz],
+            &mut m[HDR_LEN..HDR_LEN + sz],
             &tag.into(),
         )
         .map_err(|_| ())?;
 
     // Every response payload starts with a u32 status; non-zero = PSP refused
     // the inner request (e.g. bad VMPL).
-    if u32::from_le_bytes(priv_[HDR_LEN..HDR_LEN + 4].try_into().unwrap()) != 0 {
+    if u32::from_le_bytes(m[HDR_LEN..HDR_LEN + 4].try_into().unwrap()) != 0 {
         return Err(());
     }
     Ok(())

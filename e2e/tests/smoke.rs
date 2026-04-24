@@ -44,15 +44,14 @@ fn libfido2_vmm_snp() {
     eprintln!(
         "snp: v{} measurement={} chip_id={} tcb={:#x}",
         rep.version(),
-        hex(rep.measurement()),
-        hex(&rep.chip_id()[..8]),
+        snp::hex(rep.measurement()),
+        snp::hex(&rep.chip_id()[..8]),
         rep.reported_tcb(),
     );
 
     let m1 = rep.measurement().to_vec();
-    let vcek = snp::fetch_vcek(&rep, std::path::Path::new("target/vcek-cache"));
-    if let Some(vcek) = &vcek {
-        snp::verify_signature(&rep, vcek);
+    if let Some(vcek) = snp::fetch_vcek(&rep, std::path::Path::new("target/vcek-cache")) {
+        snp::verify_signature(&rep, &vcek);
         eprintln!("snp: VCEK signature ok");
     }
 
@@ -72,10 +71,6 @@ fn libfido2_vmm_snp() {
         0,
         "launch-1 credential did not resolve after relaunch"
     );
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// `ssh-keygen -t ecdsa-sk` drives makeCredential; the login drives

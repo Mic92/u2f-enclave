@@ -73,6 +73,7 @@ struct SnpLaunchUpdate {
 }
 
 #[repr(C)]
+#[derive(Default)]
 struct SnpLaunchFinish {
     id_block_uaddr: u64,
     id_auth_uaddr: u64,
@@ -177,23 +178,11 @@ impl Snp {
             vm,
             &self.sev,
             KVM_SEV_SNP_LAUNCH_FINISH,
-            &mut SnpLaunchFinish {
-                id_block_uaddr: 0,
-                id_auth_uaddr: 0,
-                id_block_en: 0,
-                auth_key_en: 0,
-                vcek_disabled: 0,
-                host_data: [0; 32],
-                pad0: [0; 3],
-                flags: 0,
-                pad1: [0; 4],
-            },
+            &mut SnpLaunchFinish::default(),
         )?;
         Ok(())
     }
-}
 
-impl Snp {
     fn update(&self, vm: &OwnedFd, uaddr: *const u8, gpa: u64, len: u64, ty: u8) -> io::Result<()> {
         // KVM may process fewer pages than requested and hand back updated
         // gfn_start/len/uaddr; loop until done.

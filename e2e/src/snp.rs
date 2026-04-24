@@ -37,15 +37,14 @@ impl<'a> Report<'a> {
     pub fn signed(&self) -> &[u8] {
         &self.0[..0x2a0]
     }
-    /// (r, s) as 48-byte big-endian — the on-wire format is 72-byte
-    /// little-endian-padded per component.
-    pub fn sig_rs(&self) -> ([u8; 48], [u8; 48]) {
-        let f = |o: usize| {
-            let mut v: [u8; 48] = self.0[o..o + 48].try_into().unwrap();
-            v.reverse();
-            v
-        };
-        (f(0x2a0), f(0x2a0 + 72))
+    /// `r||s` big-endian. On-wire format is 72-byte LE-padded per component.
+    pub fn sig_be(&self) -> [u8; 96] {
+        let mut rs = [0u8; 96];
+        for (h, w) in [(0, 0x2a0), (48, 0x2a0 + 72)] {
+            rs[h..h + 48].copy_from_slice(&self.0[w..w + 48]);
+            rs[h..h + 48].reverse();
+        }
+        rs
     }
 }
 
@@ -191,14 +190,10 @@ pub fn check_binding(auth_data: &[u8], cdh: &[u8; 32], report: &Report<'_>) {
 /// (ASK/ARK chain check would additionally prove the VCEK is AMD-issued; the
 /// KDS fetch already pins to AMD's endpoint, so for the test this is enough.)
 pub fn verify_signature(report: &Report<'_>, vcek_der: &[u8]) {
-    let vk = vcek_pubkey(vcek_der);
-    let (r, s) = report.sig_rs();
-    let mut rs = [0u8; 96];
-    rs[..48].copy_from_slice(&r);
-    rs[48..].copy_from_slice(&s);
-    let sig = Signature::from_slice(&rs).expect("sig parse");
+    let sig = Signature::from_slice(&report.sig_be()).expect("sig parse");
     // ABI §7.3: signature is over SHA-384(report[0..0x2a0]).
-    vk.verify_prehash(&Sha384::digest(report.signed()), &sig)
+    vcek_pubkey(vcek_der)
+        .verify_prehash(&Sha384::digest(report.signed()), &sig)
         .expect("VCEK signature on SNP report does not verify");
 }
 
@@ -271,6 +266,6 @@ fn vcek_pubkey(der: &[u8]) -> VerifyingKey {
     VerifyingKey::from_sec1_bytes(&der[i + 3..i + 3 + 97]).expect("VCEK pubkey")
 }
 
-fn hex(b: &[u8]) -> String {
+pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
