@@ -54,23 +54,34 @@ handling. The uhid bridge runs in-process. `e2e::libfido2_vmm{,_snp}` run
 the full `libfido2` register/attest/assert/verify against the single
 binary.
 
-## Stage 4 — attestation in attStmt
+## Stage 4 — attestation in attStmt — done
 
-Replace `fmt:"packed"` self-attestation with `fmt:"sev-snp"` (working name):
+`fmt` stays `"packed"` so stock libfido2 verifies the self-attestation;
+the SNP report rides alongside under an extra `"snp"` key it ignores:
 
 ```text
 attStmt = {
   "alg": -7,
-  "sig": ecdsa(credKey, authData || clientDataHash),     // unchanged
-  "snp": SNP_ATTESTATION_REPORT,                         // report_data = sha512(credPubKey)
-  "x5c": [VCEK, ASK, ARK]                                // AMD chain
-}
+  "sig": ecdsa(credKey, authData || clientDataHash),     // self-attestation
+  "snp": SNP_ATTESTATION_REPORT,                         // report_data =
+}                                                        //   sha512(authData || cdh)
 ```
 
-Guest issues `SVM_VMGEXIT_GUEST_REQUEST` via the GHCB; vmm answers
-`KVM_EXIT_SNP_REQ_CERTS` with the VCEK chain. Verifier checks report
-signature → VCEK → ASK/ARK and compares `report.measurement` against the
-value computed from the embedded ELF + VMSA template at build time.
+Guest: vmm injects a `SECRETS` page at `0x1000`; `greq.rs` reads VMPCK0,
+AES-256-GCM-wraps `MSG_REPORT_REQ`/`MSG_KEY_REQ`, and issues
+`SVM_VMGEXIT_GUEST_REQUEST` (handled entirely in-kernel by KVM). The
+derived key (`guest_field_select = policy|measurement`) is the master
+secret — same binary on same chip ⇒ credentials survive restarts.
+
+Verifier (`e2e/src/snp.rs`): raw-hidraw CTAPHID client extracts the
+report, checks `report_data` binds `authData||cdh`, fetches the VCEK
+from AMD KDS by `(chip_id, reported_tcb)`, and verifies the P-384
+signature. A second launch asserts the measurement is stable.
+
+Not yet: an offline tool that recomputes the expected measurement from
+the ELF + a VMSA template (à la `sev-snp-measure`). KVM's
+`sev_es_sync_vmsa` packs FPU/VMCB-save-area defaults that are kernel-
+version-specific, so this is its own small project.
 
 ## Non-SEV development loop
 

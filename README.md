@@ -46,8 +46,12 @@ minimal TCB rather than a fork of an existing SVSM.
   `#VC` handler — `PVALIDATE`/PSC, virtio-vsock over shared rings).
   ~110 KB of code, 436 KB measured launch image. `e2e::libfido2_vmm_snp`
   runs the full `libfido2` round-trip from inside encrypted RAM.
-- **M3 (next)** – SNP attestation report in `attStmt`, expected-measurement
-  computation, verifier; key persistence.
+- **M3 (done)** – SNP attestation. `makeCredential` carries a PSP-signed
+  report bound to `SHA-512(authData||cdh)`; master secret is the PSP-
+  derived key (chip+measurement+policy) so credentials survive restarts.
+  `e2e::libfido2_vmm_snp` fetches the VCEK from AMD KDS and verifies the
+  P-384 signature. Offline expected-measurement recompute is the open
+  follow-up.
 - **M4** – resident keys, `clientPIN`, TDX.
 
 ## Try it
