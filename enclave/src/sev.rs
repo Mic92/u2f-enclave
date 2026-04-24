@@ -59,8 +59,8 @@ struct Page([u8; 4096]);
 /// 0 ⇒ SEV inactive. Otherwise the C-bit mask for leaf PTEs.
 static mut C_MASK: u64 = 0;
 static mut GHCB: Page = Page([0; 4096]);
-/// 4 KiB-granular tables for [0, 2 MiB) so the GHCB (and later virtqueue
-/// rings) can have C=0 while everything else stays private.
+/// 4 KiB-granular tables for [0, 2 MiB) so individual pages (GHCB,
+/// virtqueue rings) can have C=0 while everything else stays private.
 static mut PD0: PageTable = PageTable([0; 512]);
 static mut PT0: PageTable = PageTable([0; 512]);
 
@@ -133,7 +133,7 @@ fn die(_why: &str) -> ! {
 // --- bring-up -------------------------------------------------------------
 
 /// Refine page tables to 4 KiB for [0, 2 MiB), flip the GHCB page to shared,
-/// and register it. After this `outb`/`inb`/`outl` route via the GHCB.
+/// and register it.
 pub fn init(c_bit: u32) {
     let _ = rdmsr(MSR_SEV_STATUS); // #GP-triple-faults if vmm lied about SEV.
     let c = 1u64 << c_bit;
@@ -168,8 +168,7 @@ pub fn init(c_bit: u32) {
 }
 
 /// Flip an identity-mapped, page-aligned range to shared. Anything the host
-/// must read or write (GHCB, virtqueue rings, DMA buffers) goes through
-/// here; everything else stays private.
+/// must read or write goes through here; everything else stays private.
 pub fn share(va: u64, bytes: usize) {
     let c = unsafe { C_MASK };
     debug_assert!(c != 0 && va & 0xfff == 0);

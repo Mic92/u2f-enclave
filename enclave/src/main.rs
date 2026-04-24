@@ -36,8 +36,8 @@ static ALLOC: LockedHeap = LockedHeap::empty();
 #[no_mangle]
 pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     if c_bit != 0 {
-        // Brings up the GHCB so port I/O works; everything below is then
-        // identical for plain and encrypted boots.
+        // Brings up the GHCB; everything below is then identical for plain
+        // and encrypted boots.
         sev::init(c_bit);
     }
 
