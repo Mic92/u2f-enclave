@@ -11,7 +11,6 @@ pub const CMD_GET_INFO: u8 = 0x04;
 pub const CMD_CLIENT_PIN: u8 = 0x06;
 pub const CMD_RESET: u8 = 0x07;
 
-/// CTAP status codes (subset).
 pub mod status {
     pub const OK: u8 = 0x00;
     pub const ERR_INVALID_COMMAND: u8 = 0x01;

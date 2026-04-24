@@ -70,7 +70,8 @@ impl<P: Platform> Authenticator<P> {
                 if p.cid != cid {
                     return hid::error(cid, hid::ERR_CHANNEL_BUSY);
                 }
-                // Same channel restarting: drop the half-assembled message.
+                // Same channel restarting; the half-assembled buffer is
+                // discarded when `self.pending` is overwritten below.
             }
 
             let take = bcnt.min(hid::INIT_DATA_SIZE);
@@ -209,12 +210,7 @@ mod tests {
         let mut a = auth();
         let payload: Vec<u8> = (0..200).map(|i| i as u8).collect();
         let out = feed(&mut a, fragment(0x1234_5678, CTAPHID_PING, &payload));
-        // Response is the same payload fragmented identically.
-        let expect = fragment(0x1234_5678, CTAPHID_PING, &payload);
-        assert_eq!(out.len(), expect.len());
-        for (o, e) in out.iter().zip(expect.iter()) {
-            assert_eq!(o, e);
-        }
+        assert_eq!(out, fragment(0x1234_5678, CTAPHID_PING, &payload));
     }
 
     #[test]
