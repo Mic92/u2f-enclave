@@ -42,11 +42,37 @@ fn libfido2_vmm_snp() {
     let rep = snp::Report(&rep);
     snp::check_binding(&ad, &cdh, &rep);
     eprintln!(
-        "snp report: measurement={} chip_id={} tcb={:#x}",
+        "snp: v{} measurement={} chip_id={} tcb={:#x}",
+        rep.version(),
         hex(rep.measurement()),
         hex(&rep.chip_id()[..8]),
         rep.reported_tcb(),
     );
+
+    let m1 = rep.measurement().to_vec();
+    let vcek = snp::fetch_vcek(&rep, std::path::Path::new("target/vcek-cache"));
+    if let Some(vcek) = &vcek {
+        snp::verify_signature(&rep, vcek);
+        eprintln!("snp: VCEK signature ok");
+    }
+
+    // Second launch: same binary ⇒ same measurement ⇒ same PSP-derived
+    // master key ⇒ the credential just minted still resolves. This is the
+    // operational property a relying party cares about, and it sidesteps
+    // having to reproduce KVM's VMSA byte-for-byte.
+    drop(be);
+    let be = vmm_backend(true);
+    let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");
+    let rep2 = snp::Report(&rep2);
+    assert_eq!(
+        rep2.measurement(),
+        m1,
+        "measurement not stable across launches"
+    );
+    if let Some(vcek) = &vcek {
+        snp::verify_signature(&rep2, vcek);
+    }
+    fido2_roundtrip(&be.hidraw);
 }
 
 fn hex(b: &[u8]) -> String {

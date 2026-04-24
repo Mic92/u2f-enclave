@@ -10,3 +10,5 @@ publish = false
 [dependencies]
 ctap = { path = "../ctap" }
 sha2 = "0.10"
+p384 = { version = "0.13", features = ["ecdsa"] }
+ureq = "2"

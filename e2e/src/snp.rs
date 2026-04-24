@@ -4,19 +4,24 @@
 //! key that stock libfido2 ignores; reuses the same CBOR codec the enclave
 //! uses.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
 use ctap::cbor::Reader;
 use ctap::hid;
-use sha2::{Digest, Sha512};
+use p384::ecdsa::signature::hazmat::PrehashVerifier;
+use p384::ecdsa::{Signature, VerifyingKey};
+use sha2::{Digest, Sha384, Sha512};
 
 /// SNP `ATTESTATION_REPORT` structure (firmware ABI §7.3, Table 22).
 /// 1184 bytes; signature covers `[0..0x2a0]`.
 pub struct Report<'a>(pub &'a [u8]);
 impl<'a> Report<'a> {
     pub const LEN: usize = 1184;
+    pub fn version(&self) -> u32 {
+        u32::from_le_bytes(self.0[..4].try_into().unwrap())
+    }
     pub fn report_data(&self) -> &[u8] {
         &self.0[0x50..0x90]
     }
@@ -151,4 +156,92 @@ pub fn check_binding(auth_data: &[u8], cdh: &[u8; 32], report: &Report<'_>) {
         "report_data does not bind authData||cdh"
     );
     assert_ne!(report.measurement(), [0u8; 48], "zero measurement");
+}
+
+/// Verify the report's ECDSA P-384 signature against the VCEK leaf cert.
+/// Proves the report was produced by a genuine AMD PSP at the stated TCB.
+/// (ASK/ARK chain check would additionally prove the VCEK is AMD-issued; the
+/// KDS fetch already pins to AMD's endpoint, so for the test this is enough.)
+pub fn verify_signature(report: &Report<'_>, vcek_der: &[u8]) {
+    let vk = vcek_pubkey(vcek_der);
+    let (r, s) = report.sig_rs();
+    let mut rs = [0u8; 96];
+    rs[..48].copy_from_slice(&r);
+    rs[48..].copy_from_slice(&s);
+    let sig = Signature::from_slice(&rs).expect("sig parse");
+    // ABI §7.3: signature is over SHA-384(report[0..0x2a0]).
+    vk.verify_prehash(&Sha384::digest(report.signed()), &sig)
+        .expect("VCEK signature on SNP report does not verify");
+}
+
+/// AMD KDS lookup by `(chip_id, reported_tcb)`, cached on disk so the test
+/// is not network-bound after the first run. Returns `None` if neither cache
+/// nor network is available so the test can soft-skip.
+pub fn fetch_vcek(report: &Report<'_>, cache_dir: &Path) -> Option<Vec<u8>> {
+    let _ = fs::create_dir_all(cache_dir);
+    let tcb = report.reported_tcb().to_le_bytes();
+    let cache = cache_dir.join(format!(
+        "vcek-{}-{:016x}.der",
+        hex(&report.chip_id()[..8]),
+        report.reported_tcb()
+    ));
+    if let Ok(b) = fs::read(&cache) {
+        return Some(b);
+    }
+    // KDS product name from report v3+'s cpuid (family, model). Mapping per
+    // virtee/sev (Apache-2.0). v2 reports lack the field; caller sets env.
+    let (fam, mdl) = (report.0[0x188], report.0[0x189]);
+    let product = if report.version() < 3 {
+        std::env::var("U2FE_KDS_PRODUCT").ok()?
+    } else {
+        match (fam, mdl) {
+            (0x19, 0x00..=0x0f) => "Milan",
+            (0x19, 0x10..=0x1f) | (0x19, 0xa0..=0xaf) => "Genoa",
+            (0x1a, 0x00..=0x11) => "Turin",
+            _ => {
+                eprintln!("SKIP: unknown cpuid fam={fam:#x} mdl={mdl:#x} for KDS product");
+                return None;
+            }
+        }
+        .into()
+    };
+    let url = format!(
+        "https://kdsintf.amd.com/vcek/v1/{product}/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
+        hex(report.chip_id()),
+        tcb[0],
+        tcb[1],
+        tcb[6],
+        tcb[7],
+    );
+    eprintln!("fetching VCEK: {url}");
+    let der = match ureq::get(&url).call() {
+        Ok(r) => {
+            let mut v = Vec::new();
+            r.into_reader().read_to_end(&mut v).ok()?;
+            v
+        }
+        Err(e) => {
+            eprintln!("SKIP: KDS fetch failed ({e}); set U2FE_KDS_PRODUCT or pre-seed {cache:?}");
+            return None;
+        }
+    };
+    let _ = fs::write(&cache, &der);
+    Some(der)
+}
+
+/// Pull the SEC1 uncompressed point out of an x509 DER cert. VCEK certs
+/// always carry the EC pubkey as `BIT STRING(98){0x00, 0x04, x[48], y[48]}`;
+/// scanning for that header is far smaller than a real x509 parser and the
+/// false-positive risk is nil for these fixed-shape AMD certs.
+fn vcek_pubkey(der: &[u8]) -> VerifyingKey {
+    let needle = [0x03, 0x62, 0x00, 0x04];
+    let i = der
+        .windows(4)
+        .position(|w| w == needle)
+        .expect("no P-384 SEC1 point in VCEK");
+    VerifyingKey::from_sec1_bytes(&der[i + 3..i + 3 + 97]).expect("VCEK pubkey")
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
