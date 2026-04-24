@@ -143,8 +143,9 @@ the host agrees.
 If the computation is wrong, `verify` rejects valid reports; it can't
 accept an invalid one because the PSP only signs what it actually
 measured. `e2e::libfido2_vmm_snp` checks the computation against a real
-chip on every run. When that fails, dump KVM's actual VMSA and diff
-against `measure::vmsa_page`:
+chip on every run; it has matched on Milan and Genoa across kernels 6.11
+and 6.18 (the measurement is chip- and host-kernel-independent). When it
+fails, dump KVM's actual VMSA and diff against `measure::vmsa_page`:
 
 ```sh
 echo 'func sev_es_sync_vmsa +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
