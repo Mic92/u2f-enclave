@@ -18,7 +18,7 @@ use crate::sev::{self, Page};
 
 /// Fixed GPA where the vmm injects `SNP_PAGE_TYPE_SECRETS`. Sits below 1 MiB
 /// (outside the loaded ELF) and inside the 2 MiB PT0 window.
-pub const SECRETS_GPA: u64 = 0x1000;
+const SECRETS_GPA: u64 = 0x1000;
 const VMPCK0_OFF: usize = 32; // version,flags,fms,rsvd,gosvw[16] precede it
 
 const HDR_LEN: usize = 96;
@@ -46,8 +46,7 @@ static mut VMPCK: [u8; 32] = [0; 32];
 static mut SEQNO: u64 = 1;
 
 /// Read VMPCK0 out of the secrets page and flip the staging pages to shared.
-/// Must run after `sev::init` (PT0/C-bit are up) and before any heap use
-/// (the AES context lives on the stack).
+/// Must run after `sev::init` (PT0/C-bit are up).
 pub fn init() {
     // The secrets page is private and PSP-validated at launch; a plain read
     // through the C=1 mapping is correct.
@@ -70,43 +69,39 @@ fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
     let mut iv = [0u8; 12];
     iv[..8].copy_from_slice(&seq.to_le_bytes());
 
-    // Build header + plaintext payload directly in the shared page; the
-    // host only ever sees the post-encryption state, and any tampering is
-    // caught by the PSP's GCM verify.
-    let req = unsafe { &mut (*addr_of_mut!(REQ)).0 };
-    req.fill(0);
-    req[32..40].copy_from_slice(&seq.to_le_bytes()); // msg_seqno
-    req[48] = 1; // algo = AES-256-GCM
-    req[49] = 1; // hdr_version
-    req[50..52].copy_from_slice(&(HDR_LEN as u16).to_le_bytes());
-    req[52] = msg_type;
-    req[53] = 1; // msg_version
-    req[54..56].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+    // Build and encrypt in the *private* staging page so the host never
+    // observes plaintext nor a partially-built header.
+    let m = unsafe { &mut (*addr_of_mut!(PRIV)).0 };
+    m.fill(0);
+    m[32..40].copy_from_slice(&seq.to_le_bytes()); // msg_seqno
+    m[48] = 1; // algo = AES-256-GCM
+    m[49] = 1; // hdr_version
+    m[50..52].copy_from_slice(&(HDR_LEN as u16).to_le_bytes());
+    m[52] = msg_type;
+    m[53] = 1; // msg_version
+    m[54..56].copy_from_slice(&(payload.len() as u16).to_le_bytes());
     // 56..60 rsvd, 60 vmpck=0, 61..96 rsvd
-    req[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
+    m[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
 
-    // Stage AAD on the stack so the borrow checker lets us encrypt-in-place
-    // into the same page.
     let mut aad = [0u8; AAD_LEN];
-    aad.copy_from_slice(&req[AAD_OFF..HDR_LEN]);
+    aad.copy_from_slice(&m[AAD_OFF..HDR_LEN]);
     let tag = cipher
-        .encrypt_in_place_detached(
-            (&iv).into(),
-            &aad,
-            &mut req[HDR_LEN..HDR_LEN + payload.len()],
-        )
+        .encrypt_in_place_detached((&iv).into(), &aad, &mut m[HDR_LEN..HDR_LEN + payload.len()])
         .map_err(|_| ())?;
-    req[..16].copy_from_slice(&tag);
+    m[..16].copy_from_slice(&tag);
+
+    // Commit the IV *before* the ciphertext becomes host-visible: a
+    // malicious host that fakes a VMM error to make us retry must not get a
+    // second ciphertext under the same (key, IV) — that would leak the GHASH
+    // key. The PSP may then reject our next seqno; that's DoS, not a leak.
+    unsafe { SEQNO += 2 };
+    unsafe { &mut (*addr_of_mut!(REQ)).0 }.copy_from_slice(m);
 
     let info2 = sev::guest_request(addr_of!(REQ) as u64, addr_of!(RESP) as u64);
     if info2 != 0 {
         // Low 32 = PSP firmware error; high 32 = VMM error (e.g. busy).
-        // Either is unrecoverable for our single-shot use.
         return Err(());
     }
-    // Once a response was produced the PSP has consumed (seq, seq+1); reuse
-    // would be rejected, so bump unconditionally even if we fail to decrypt.
-    unsafe { SEQNO += 2 };
 
     // Copy out of shared memory before inspecting anything.
     let priv_ = unsafe { &mut (*addr_of_mut!(PRIV)).0 };

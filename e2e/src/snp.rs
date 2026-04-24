@@ -205,6 +205,7 @@ pub fn fetch_vcek(report: &Report<'_>, cache_dir: &Path) -> Option<Vec<u8>> {
         }
         .into()
     };
+    // TCB byte layout below is Milan/Genoa; Turin reshuffled it.
     let url = format!(
         "https://kdsintf.amd.com/vcek/v1/{product}/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
         hex(report.chip_id()),
