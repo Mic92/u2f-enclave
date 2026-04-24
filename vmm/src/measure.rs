@@ -17,13 +17,9 @@ const PAGE_TYPE_NORMAL: u8 = 1;
 const PAGE_TYPE_VMSA: u8 = 2;
 const PAGE_TYPE_SECRETS: u8 = 5;
 
-/// Mirror what KVM produces for our PVH vCPU at `LAUNCH_FINISH`. KVM
-/// `memcpy`s its `vmcb_save_area` (segments, CRx, DRx, EFER, g_pat — all
-/// post-`KVM_SET_SREGS`, with KVM's forced bits OR'd in), then overwrites
-/// GPRs from `KVM_SET_REGS`, then sets `sev_features`/FPU init state.
-/// `setup_pvh_cpu` is the source of truth for what we asked for; the values
-/// below are what KVM actually writes after its transforms. Keep the two in
-/// lock-step.
+/// What KVM writes for our PVH vCPU after its own transforms (forced
+/// EFER/CR4 bits, vCPU-reset defaults, FPU init). Keep in lock-step with
+/// `setup_pvh_cpu`.
 pub fn vmsa_page(entry: u32) -> [u8; 4096] {
     let mut p = [0u8; 4096];
     // vmcb_seg = u16 selector, u16 attrib, u32 limit, u64 base.

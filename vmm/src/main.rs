@@ -279,9 +279,8 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
         })
 }
 
-/// Recompute the launch measurement from the embedded ELF and print it.
-/// Hex to stdout so it composes (`m=$(u2f-enclave --measure)`); context to
-/// stderr. Host-independent: every input is fixed by this binary.
+/// Recompute the launch measurement from the embedded ELF: hex to stdout
+/// (so it composes), context to stderr.
 fn print_measure() -> io::Result<()> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;

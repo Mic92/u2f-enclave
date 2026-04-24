@@ -58,10 +58,8 @@ where
     }
 }
 
-/// uhid CREATE2 doesn't tell us which node the kernel allocated, so scan
-/// sysfs by name. The node appears asynchronously (kernel → udev), hence
-/// the short retry; falls back to a generic hint rather than blocking the
-/// bridge if it never shows.
+/// uhid CREATE2 doesn't return the allocated node, and it appears
+/// asynchronously — scan sysfs by name with a short retry.
 fn find_hidraw() -> String {
     let needle = format!("HID_NAME={HID_NAME}");
     let deadline = Instant::now() + Duration::from_secs(1);
