@@ -72,11 +72,6 @@ impl Writer {
     pub fn bool(&mut self, v: bool) {
         self.buf.push(if v { 0xF5 } else { 0xF4 });
     }
-    /// Append already-encoded CBOR verbatim. Used to splice a COSE key into
-    /// the middle of an `authenticatorData` byte string.
-    pub fn raw(&mut self, b: &[u8]) {
-        self.buf.extend_from_slice(b);
-    }
 
     pub fn into_vec(self) -> Vec<u8> {
         self.buf

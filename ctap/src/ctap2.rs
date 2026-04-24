@@ -82,30 +82,22 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
 
     let mut client_data_hash: Option<[u8; 32]> = None;
     let mut rp_id: Option<&str> = None;
+    let mut have_user = false;
     let mut es256_ok = false;
+    let mut exclude: Vec<Vec<u8>> = Vec::new();
 
     for _ in 0..n {
         match r.unsigned()? {
             1 => client_data_hash = Some(read_hash(&mut r)?),
             2 => rp_id = Some(read_entity_id_text(&mut r)?),
             3 => {
-                // user: only its presence is required for non-resident creds.
+                // user: required by spec; for non-resident creds we only need
+                // to know it was supplied.
                 r.skip()?;
+                have_user = true;
             }
             4 => es256_ok = read_pubkey_params(&mut r)?,
-            5 => {
-                // excludeList: refuse if any entry was minted by us for this
-                // RP. We do not yet know rp_id_hash here in the general case
-                // (CTAP2 canonical ordering puts key 2 before 5, so in
-                // practice we do), so buffer the IDs.
-                let ids = read_cred_descriptor_ids(&mut r)?;
-                if let Some(rp) = rp_id {
-                    let h = cred::sha256(rp.as_bytes());
-                    if ids.iter().any(|id| ctx.keys.lookup(&h, id).is_some()) {
-                        return Err(status::ERR_CREDENTIAL_EXCLUDED);
-                    }
-                }
-            }
+            5 => exclude = read_cred_descriptor_ids(&mut r)?,
             7 => read_mc_options(&mut r)?,
             _ => r.skip()?,
         }
@@ -113,11 +105,22 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
 
     let _cdh = client_data_hash.ok_or(status::ERR_MISSING_PARAMETER)?;
     let rp_id = rp_id.ok_or(status::ERR_MISSING_PARAMETER)?;
+    if !have_user {
+        return Err(status::ERR_MISSING_PARAMETER);
+    }
     if !es256_ok {
         return Err(status::ERR_UNSUPPORTED_ALGORITHM);
     }
 
     let rp_id_hash = cred::sha256(rp_id.as_bytes());
+    // Evaluated after parsing so the check is independent of map key order;
+    // a non-canonical request must not be able to skip exclusion.
+    if exclude
+        .iter()
+        .any(|id| ctx.keys.lookup(&rp_id_hash, id).is_some())
+    {
+        return Err(status::ERR_CREDENTIAL_EXCLUDED);
+    }
     let c = cred::make(ctx.platform, ctx.keys, &rp_id_hash);
 
     // authenticatorData (WebAuthn §6.1)
@@ -240,7 +243,10 @@ fn read_pubkey_params(r: &mut Reader<'_>) -> Result<bool, u8> {
 
 fn read_cred_descriptor_ids(r: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, u8> {
     let n = r.array()?;
-    let mut out = Vec::with_capacity(n as usize);
+    // `n` is attacker-controlled; pre-reserving would let a 5-byte header
+    // request gigabytes. Growth is bounded by the actual entries decoded,
+    // which is bounded by the request buffer.
+    let mut out = Vec::new();
     for _ in 0..n {
         let m = r.map()?;
         let mut id: Option<&[u8]> = None;
@@ -465,6 +471,71 @@ mod tests {
         // Wrong RP must not resolve the same credId.
         let resp = handle(&mut cx, &ga_request("evil.org", cred_id, &cdh));
         assert_eq!(resp[0], status::ERR_NO_CREDENTIALS);
+    }
+
+    #[test]
+    fn huge_array_header_is_not_preallocated() {
+        // allowList claiming 2^32-1 entries but supplying none must fail
+        // cleanly, not OOM.
+        let (mut p, keys, aaguid) = ctx();
+        let mut cx = Ctx {
+            platform: &mut p,
+            aaguid: &aaguid,
+            keys: &keys,
+        };
+        let mut w = Writer::new();
+        w.map(3);
+        w.unsigned(1);
+        w.text("a");
+        w.unsigned(2);
+        w.bytes(&[0; 32]);
+        w.unsigned(3);
+        let mut req = vec![CMD_GET_ASSERTION];
+        req.extend(w.into_vec());
+        req.extend_from_slice(&[0x9A, 0xFF, 0xFF, 0xFF, 0xFF]); // array(2^32-1)
+        assert_eq!(handle(&mut cx, &req)[0], status::ERR_INVALID_CBOR);
+    }
+
+    #[test]
+    fn exclude_list_independent_of_key_order() {
+        let (mut p, keys, aaguid) = ctx();
+        let rp_hash = cred::sha256(b"example.org");
+        let existing = cred::make(&mut p, &keys, &rp_hash);
+        let mut cx = Ctx {
+            platform: &mut p,
+            aaguid: &aaguid,
+            keys: &keys,
+        };
+        // Deliberately non-canonical: excludeList (5) before rp (2).
+        let mut w = Writer::new();
+        w.map(5);
+        w.unsigned(5);
+        w.array(1);
+        w.map(2);
+        w.text("id");
+        w.bytes(&existing.id);
+        w.text("type");
+        w.text("public-key");
+        w.unsigned(1);
+        w.bytes(&[0; 32]);
+        w.unsigned(2);
+        w.map(1);
+        w.text("id");
+        w.text("example.org");
+        w.unsigned(3);
+        w.map(1);
+        w.text("id");
+        w.bytes(&[1]);
+        w.unsigned(4);
+        w.array(1);
+        w.map(2);
+        w.text("alg");
+        w.int(-7);
+        w.text("type");
+        w.text("public-key");
+        let mut req = vec![CMD_MAKE_CREDENTIAL];
+        req.extend(w.into_vec());
+        assert_eq!(handle(&mut cx, &req)[0], status::ERR_CREDENTIAL_EXCLUDED);
     }
 
     #[test]
