@@ -39,6 +39,8 @@ Usage:
                                      measurement matches this build; print
                                      report_data for the caller's binding
                                      check; exit 0 iff ok
+  u2f-enclave vcek-url               read a report on stdin, print the AMD
+                                     URL to fetch its chip's certificate
   u2f-enclave attest [DEVICE]        demo client: register a credential on
                                      the local hidraw device, check the
                                      report binds it, write the 1184-byte
@@ -47,8 +49,9 @@ Usage:
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
-  --vcek FILE  use this VCEK DER instead of fetching from AMD KDS
-               (fetched certs are cached under $XDG_CACHE_HOME/u2f-enclave)
+  --vcek FILE  VCEK certificate (DER). Without it, verify looks in
+               $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
+               curl command to fetch it from AMD
 
 --measure and verify need no /dev/* access and run on any x86_64 Linux.
 
@@ -65,6 +68,9 @@ fn main() -> io::Result<()> {
     }
     if args.next_if_eq("attest").is_some() {
         std::process::exit(attest::cmd(args.next()));
+    }
+    if args.next_if_eq("vcek-url").is_some() {
+        std::process::exit(verify::cmd_url());
     }
     if args.next_if_eq("verify").is_some() {
         let vcek = args.next_if_eq("--vcek").and_then(|_| args.next());

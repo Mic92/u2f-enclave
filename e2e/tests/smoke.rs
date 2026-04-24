@@ -40,6 +40,21 @@ fn libfido2_vmm_snp() {
     let cdh = [0x11u8; 32];
     let (ad, rep) = snp::make_credential(&be.hidraw, &cdh, "example.org");
 
+    // Documented user flow: vcek-url → curl → verify --vcek.
+    let url = pipe(Command::new(host_bin("u2f-enclave")).arg("vcek-url"), &rep);
+    let url = String::from_utf8(url.stdout).unwrap().trim().to_string();
+    let tmp = Tmp::new("snp");
+    let vcek = tmp.join("vcek.der");
+    if !Command::new("curl")
+        .args(["-fsSo", vcek.to_str().unwrap(), &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        eprintln!("SKIP: curl {url} failed (AMD KDS unreachable)");
+        return;
+    }
+
     // The relying-party check is `u2f-enclave verify` itself: VCEK signature,
     // and predictor==PSP for the measurement (a KVM VMSA change shows up as
     // exit 1 here, not silent drift). It prints report_data; we do the
@@ -47,6 +62,8 @@ fn libfido2_vmm_snp() {
     let out = pipe(
         Command::new(host_bin("u2f-enclave"))
             .arg("verify")
+            .arg("--vcek")
+            .arg(&vcek)
             .stderr(std::process::Stdio::inherit()),
         &rep,
     );

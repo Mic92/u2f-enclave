@@ -88,10 +88,12 @@ the 1184-byte report to stdout.
 
 Copy `report.bin` to any other Linux box with the same `u2f-enclave`
 binary — your laptop, a CI runner, your server. No AMD hardware, no
-`/dev/kvm`:
+`/dev/kvm`. The chip's certificate is a one-time fetch (it only changes
+when that machine takes a microcode update):
 
 ```console
-laptop$ u2f-enclave verify < report.bin
+laptop$ curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"
+laptop$ u2f-enclave verify --vcek vcek.der < report.bin
 report_data   6f020c9e5d1731ca…
 measurement   70eabebbf79908ce…  ok
 policy        0x30000  ok
@@ -102,8 +104,8 @@ laptop$ echo $?
 0
 ```
 
-`verify` fetches the chip's certificate from AMD and checks the
-signature (check 2), then recomputes the measurement for the guest image
+`verify` checks the report's signature against that certificate
+(check 2), then recomputes the measurement for the guest image
 embedded in itself and compares (check 3). Exit status 0 means: a
 genuine AMD chip signed this, and what it measured matches what this
 binary would launch.
@@ -177,9 +179,11 @@ bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
 ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
 ```
 
-The certificate is fetched from AMD once and cached under
-`$XDG_CACHE_HOME`; pass `--vcek FILE` to supply it yourself. Runs on any
-x86_64 Linux box; same binary, no AMD hardware needed.
+Get `vcek.der` once with
+`curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"` (or run
+`verify` without `--vcek` and it prints the same command, looking in
+`$XDG_CACHE_HOME/u2f-enclave` first). Runs on any x86_64 Linux box; same
+binary, no AMD hardware needed.
 
 **Why keys survive a restart:** the authenticator never stores its
 master secret. On every launch it asks the chip to re-derive it from a

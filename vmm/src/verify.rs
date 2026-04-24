@@ -4,9 +4,8 @@
 //!
 //! Refs: SNP firmware ABI §7.3 (Table 22 report layout), AMD KDS spec.
 
-use std::io::{self, Read};
 use std::path::PathBuf;
-use std::{env, fs};
+use std::{env, fs, io, io::Read};
 
 use p384::ecdsa::signature::hazmat::PrehashVerifier;
 use p384::ecdsa::{Signature, VerifyingKey};
@@ -18,9 +17,6 @@ pub const REPORT_LEN: usize = 1184;
 /// `[0..0x2a0]`.
 pub struct Report<'a>(pub &'a [u8; REPORT_LEN]);
 impl Report<'_> {
-    pub fn version(&self) -> u32 {
-        u32::from_le_bytes(self.0[..4].try_into().unwrap())
-    }
     pub fn policy(&self) -> u64 {
         u64::from_le_bytes(self.0[8..16].try_into().unwrap())
     }
@@ -69,11 +65,11 @@ fn vcek_pubkey(der: &[u8]) -> Result<VerifyingKey, String> {
     VerifyingKey::from_sec1_bytes(&der[i + 3..i + 100]).map_err(|e| format!("VCEK pubkey: {e}"))
 }
 
-/// AMD KDS lookup by `(chip_id, reported_tcb)`. Result is cached on disk so
-/// only the first call per chip+tcb hits the network.
-pub fn fetch_vcek(r: &Report<'_>) -> Result<Vec<u8>, String> {
+/// VCEK is per `(chip_id, reported_tcb)`, so it can't be baked in. Look in
+/// the cache; on miss, print the exact `curl` that populates it. Keeps an
+/// HTTP+TLS stack out of the binary for what is a once-per-chip fetch.
+pub fn find_vcek(r: &Report<'_>) -> Result<Vec<u8>, String> {
     let dir = cache_dir();
-    let _ = fs::create_dir_all(&dir);
     let cache = dir.join(format!(
         "vcek-{}-{:016x}.der",
         hex(&r.chip_id()[..8]),
@@ -82,52 +78,55 @@ pub fn fetch_vcek(r: &Report<'_>) -> Result<Vec<u8>, String> {
     if let Ok(b) = fs::read(&cache) {
         return Ok(b);
     }
+    let _ = fs::create_dir_all(&dir);
+    Err(format!(
+        "no VCEK for this chip/TCB. Fetch it once (or pass --vcek FILE):\n  \
+         curl -fsSo {} '{}'",
+        cache.display(),
+        kds_url(r),
+    ))
+}
 
-    // KDS product name from report v3+'s cpuid (family, model). Mapping per
-    // virtee/sev (Apache-2.0). v2 reports lack the field.
+/// AMD KDS lookup URL. Product name from the report's cpuid (v3+); mapping
+/// per virtee/sev (Apache-2.0). TCB byte layout is Milan/Genoa; Turin
+/// reshuffled it.
+pub fn kds_url(r: &Report<'_>) -> String {
     let (fam, mdl) = (r.0[0x188], r.0[0x189]);
-    let product = if r.version() >= 3 {
-        match (fam, mdl) {
-            (0x19, 0x00..=0x0f) => "Milan",
-            (0x19, 0x10..=0x1f | 0xa0..=0xaf) => "Genoa",
-            (0x1a, 0x00..=0x11) => "Turin",
-            _ => {
-                return Err(format!(
-                    "unknown KDS product for cpuid fam={fam:#x} mdl={mdl:#x}"
-                ))
-            }
-        }
-        .to_string()
-    } else {
-        env::var("U2FE_KDS_PRODUCT").map_err(|_| {
-            "report v<3 has no cpuid; set U2FE_KDS_PRODUCT (Milan/Genoa/Turin)".to_string()
-        })?
+    let product = match (fam, mdl) {
+        (0x19, 0x00..=0x0f) => "Milan",
+        (0x19, 0x10..=0x1f | 0xa0..=0xaf) => "Genoa",
+        (0x1a, 0x00..=0x11) => "Turin",
+        // v<3 reports have no cpuid here; let the user edit the URL.
+        _ => "<Milan|Genoa|Turin>",
     };
-    // TCB byte layout is Milan/Genoa; Turin reshuffled it.
     let tcb = r.reported_tcb().to_le_bytes();
-    let url = format!(
+    format!(
         "https://kdsintf.amd.com/vcek/v1/{product}/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
         hex(r.chip_id()),
         tcb[0],
         tcb[1],
         tcb[6],
         tcb[7],
+    )
+}
+
+/// `u2f-enclave vcek-url`: stdin = report, stdout = bare URL (composes with
+/// `curl -O "$(…)"`), stderr = where `verify` will look for it.
+pub fn cmd_url() -> i32 {
+    let mut buf = [0u8; REPORT_LEN];
+    if let Err(e) = io::stdin().read_exact(&mut buf) {
+        eprintln!("vcek-url: stdin must be a {REPORT_LEN}-byte SNP report: {e}");
+        return 2;
+    }
+    let r = Report(&buf);
+    println!("{}", kds_url(&r));
+    eprintln!(
+        "vcek-url: verify looks for this at {}/vcek-{}-{:016x}.der",
+        cache_dir().display(),
+        hex(&r.chip_id()[..8]),
+        r.reported_tcb()
     );
-    eprintln!("verify: fetching {url}");
-    let mut der = Vec::new();
-    ureq::get(&url)
-        .call()
-        .map_err(|e| {
-            format!(
-                "KDS fetch failed ({e}); pre-seed {} to run offline",
-                cache.display()
-            )
-        })?
-        .into_reader()
-        .read_to_end(&mut der)
-        .map_err(|e| e.to_string())?;
-    let _ = fs::write(&cache, &der);
-    Ok(der)
+    0
 }
 
 fn cache_dir() -> PathBuf {
@@ -157,7 +156,7 @@ pub fn cmd(vcek_path: Option<String>, expected_measurement: [u8; 48]) -> i32 {
 
     let vcek = match vcek_path {
         Some(p) => fs::read(&p).map_err(|e| format!("read {p}: {e}")),
-        None => fetch_vcek(&r),
+        None => find_vcek(&r),
     };
     let sig_ok = match vcek.and_then(|d| verify_signature(&r, &d)) {
         Ok(()) => true,
