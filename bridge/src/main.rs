@@ -53,12 +53,13 @@ fn main() -> std::io::Result<()> {
     let mut dev_r = dev;
     loop {
         let data = dev_r.read_output()?;
-        // The FIDO descriptor has no report ID, so the kernel hands us the
-        // raw 64-byte report. Normalise defensively in case a stack prepends
-        // a zero ID byte.
+        // Linux hidraw write() always carries the report-ID byte (0 here);
+        // hidraw_send_report() forwards it verbatim to uhid, so the common
+        // case is 65 bytes. Accept a bare 64 too for callers that bypass
+        // hidraw.
         let report: [u8; REPORT_SIZE] = match data.len() {
-            REPORT_SIZE => data.as_slice().try_into().unwrap(),
             n if n == REPORT_SIZE + 1 && data[0] == 0 => data[1..].try_into().unwrap(),
+            REPORT_SIZE => data.as_slice().try_into().unwrap(),
             n => {
                 eprintln!("bridge: unexpected OUTPUT size {n}, dropping");
                 continue;

@@ -40,7 +40,10 @@ pub const ERR_INVALID_CHANNEL: u8 = 0x0B;
 
 /// Split `payload` into CTAPHID packets for `cid`/`cmd`.
 pub fn fragment(cid: u32, cmd: u8, payload: &[u8]) -> Vec<Report> {
-    debug_assert!(payload.len() <= MAX_MESSAGE_SIZE);
+    // Hard assert: above this bound `seq` would reach 128 and set the
+    // INIT/CONT bit, silently corrupting the stream. Unreachable from our
+    // own callers, but cheap to check and catastrophic if violated.
+    assert!(payload.len() <= MAX_MESSAGE_SIZE);
     let mut out = Vec::new();
 
     let mut r = [0u8; HID_REPORT_SIZE];

@@ -39,13 +39,17 @@ fn main() -> std::io::Result<()> {
         eprintln!("sim: client connected");
         let mut auth = Authenticator::new(OsRandom, AAGUID);
         let mut buf: Report = [0u8; HID_REPORT_SIZE];
-        loop {
+        // One client at a time; a disconnect must not tear down the listener.
+        'client: loop {
             if let Err(e) = stream.read_exact(&mut buf) {
                 eprintln!("sim: client gone: {e}");
                 break;
             }
             for r in auth.process_report(&buf) {
-                stream.write_all(&r)?;
+                if let Err(e) = stream.write_all(&r) {
+                    eprintln!("sim: write failed: {e}");
+                    break 'client;
+                }
             }
         }
     }
