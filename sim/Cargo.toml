@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 ctap = { path = "../ctap" }
 getrandom = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"

@@ -1,9 +1,9 @@
 //! Bridge: expose the remote authenticator as a local HID device.
 //!
-//! Runs in the *consumer* VM. Connects to the authenticator (Unix socket for
-//! the simulator, AF_VSOCK for the real enclave — TODO) and registers a
-//! virtual FIDO HID device via `/dev/uhid`. Browsers and `libfido2` then see
-//! a regular `/dev/hidraw*` node.
+//! Runs in the *consumer* VM. Connects to the authenticator over a Unix
+//! socket (simulator) or AF_VSOCK (`vsock:CID:PORT`, real enclave) and
+//! registers a virtual FIDO HID device via `/dev/uhid`. Browsers and
+//! `libfido2` then see a regular `/dev/hidraw*` node.
 
 #[cfg(target_os = "linux")]
 mod uhid;
@@ -13,26 +13,39 @@ fn main() -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
+    use vsock::{VsockAddr, VsockStream};
 
     const REPORT_SIZE: usize = 64;
 
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let dir = std::env::var_os("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .expect("XDG_RUNTIME_DIR not set; pass an explicit socket path");
-            dir.join("u2f-enclave.sock")
-        });
+    let arg = std::env::args().nth(1);
+    let (mut sock_r, mut sock_w): (Box<dyn Read + Send>, Box<dyn Write + Send>) =
+        match arg.as_deref() {
+            Some(a) if a.starts_with("vsock:") => {
+                let rest = &a[6..];
+                let (cid, port) = rest.split_once(':').expect("vsock:<cid>:<port>");
+                let cid: u32 = cid.parse().expect("vsock cid");
+                let port: u32 = port.parse().expect("vsock port");
+                let s = VsockStream::connect(&VsockAddr::new(cid, port))?;
+                eprintln!("bridge: connected to vsock:{cid}:{port}");
+                (Box::new(s.try_clone()?), Box::new(s))
+            }
+            other => {
+                let path = other.map(PathBuf::from).unwrap_or_else(|| {
+                    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+                        .map(PathBuf::from)
+                        .expect("XDG_RUNTIME_DIR not set; pass an explicit socket path");
+                    dir.join("u2f-enclave.sock")
+                });
+                let s = UnixStream::connect(&path)?;
+                eprintln!("bridge: connected to {}", path.display());
+                (Box::new(s.try_clone()?), Box::new(s))
+            }
+        };
 
-    let sock = UnixStream::connect(&path)?;
-    eprintln!("bridge: connected to {}", path.display());
     let dev = uhid::Uhid::create("u2f-enclave")?;
     eprintln!("bridge: /dev/uhid device created");
 
     // socket → uhid (device INPUT reports)
-    let mut sock_r = sock.try_clone()?;
     let mut dev_w = dev.try_clone()?;
     std::thread::spawn(move || {
         let mut buf = [0u8; REPORT_SIZE];
@@ -49,7 +62,6 @@ fn main() -> std::io::Result<()> {
     });
 
     // uhid OUTPUT → socket
-    let mut sock_w = sock;
     let mut dev_r = dev;
     loop {
         let data = dev_r.read_output()?;

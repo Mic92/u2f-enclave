@@ -48,12 +48,21 @@ minimal TCB rather than a fork of an existing SVSM.
 # terminal 1: authenticator (defaults to $XDG_RUNTIME_DIR/u2f-enclave.sock)
 cargo run -p sim
 
-# terminal 2: expose as /dev/hidrawN (needs CAP_DAC_OVERRIDE or rw on /dev/uhid)
-sudo -E cargo run -p bridge -- "$XDG_RUNTIME_DIR/u2f-enclave.sock"
+# terminal 2: expose as /dev/hidrawN (needs rw on /dev/uhid)
+sudo setfacl -m u:$USER:rw /dev/uhid
+cargo run -p bridge
 
 # terminal 3
 fido2-token -L          # should list "u2f-enclave"
-fido2-token -I /dev/hidrawN
+scripts/smoke-libfido2.sh
+```
+
+Same thing over AF_VSOCK (the transport the real enclave uses; CID 1 is the
+kernel loopback so no VM is needed):
+
+```bash
+cargo run -p sim -- vsock:5995 &
+cargo run -p bridge -- vsock:1:5995
 ```
 
 ## References
