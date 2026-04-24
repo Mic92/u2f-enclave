@@ -8,8 +8,8 @@ normal `/dev/hidraw` FIDO device via a tiny uhid bridge. Every
 credential's public key to the launch measurement of this exact binary.
 
 Open re-implementation of the idea behind *Hardware Authenticator Binding*
-(Shiraishi & Shinagawa, COMPSAC 2025), built from scratch with a minimal TCB
-rather than as a fork of an existing SVSM.
+(Shiraishi & Shinagawa, COMPSAC 2025), built from scratch to keep the
+trusted code small rather than forked from an existing firmware stack.
 
 ```
 ┌──────────── consumer VM ───────────┐      ┌──── authenticator CVM (SEV-SNP) ───┐
@@ -62,10 +62,10 @@ u2f-enclave: SEV-SNP launch ok (492 KiB measured)
 u2f-enclave: ready at /dev/hidraw3
 ```
 
-Now the host cannot read the keys, every `makeCredential` carries a
-PSP-signed attestation report, and the master secret is derived by the
-PSP from this binary's launch measurement — same binary on same chip ⇒
-same keys across restarts.
+Now the host cannot read the keys, every `makeCredential` carries an
+attestation report signed by the chip's security processor, and the
+master secret is derived from this binary's launch measurement — same
+binary on same chip ⇒ same keys across restarts.
 
 ### See it work
 
@@ -87,7 +87,7 @@ credential over hidraw, checks the report binds it (check 1), and writes
 the 1184-byte report to stdout.
 
 Copy `report.bin` to any other Linux box with the same `u2f-enclave`
-binary — your laptop, CI, the RP's server. No AMD hardware, no
+binary — your laptop, a CI runner, your server. No AMD hardware, no
 `/dev/kvm`:
 
 ```console
@@ -102,19 +102,19 @@ laptop$ echo $?
 0
 ```
 
-`verify` fetches the VCEK from AMD and checks the signature (check 2),
-then compares the measurement against its own prediction for the guest
-image embedded in it (check 3). Exit status 0 means: a genuine AMD PSP
-signed this, and the measured guest matches what this binary would
-launch.
+`verify` fetches the chip's certificate from AMD and checks the
+signature (check 2), then recomputes the measurement for the guest image
+embedded in itself and compares (check 3). Exit status 0 means: a
+genuine AMD chip signed this, and what it measured matches what this
+binary would launch.
 
 That's the whole loop. In a real deployment `attest` is replaced by a
-browser posting an `attestationObject` to your server —
+browser posting a registration to your server —
 [How attestation works](#how-attestation-works) shows that variant and
-what each check actually proves. If you'd rather embed the expected
+what each check proves. If you'd rather hard-code the expected
 measurement in your own verifier instead of shelling out,
-`u2f-enclave --measure` prints just the hex digest (it's a pure function
-of the binary, so you can pin it from CI). On one box,
+`u2f-enclave --measure` prints just the hex (it depends only on the
+binary, so CI can produce it). On one box,
 `u2f-enclave attest | u2f-enclave verify` runs the lot.
 
 Run `u2f-enclave --help` for the rest.
@@ -147,10 +147,10 @@ that report:
    `0x50..0x90`) must equal `SHA-512(authData ‖ clientDataHash)`. Those
    are the exact bytes the credential's self-signature covers, so the
    report can't have been lifted from some other registration.
-2. **Signed by real AMD silicon?** The report's `chip_id` and
-   `reported_tcb` name a public VCEK certificate on AMD's Key
-   Distribution Service. Fetch it (or cache it) and verify the report's
-   P-384 signature.
+2. **Signed by real AMD silicon?** AMD publishes a certificate (the
+   *VCEK*) for every chip and firmware version, looked up by the
+   report's `chip_id` and `reported_tcb`. Fetch it and verify the
+   report's signature against it.
 3. **Running the code you audited?** The report's `measurement` (bytes
    `0x90..0xc0`) must match the build you reviewed.
    `u2f-enclave --measure` computes that value without AMD hardware; the
@@ -168,38 +168,25 @@ already use will hand you `attStmt` as a map. In Python, the whole
 relying-party check is:
 
 ```python
-import cbor2, hashlib, subprocess, sys
+import cbor2, hashlib, subprocess
 obj    = cbor2.loads(attestation_object)          # bytes from the browser
-report = obj["attStmt"]["snp"]                    # 1184-byte bstr
+report = obj["attStmt"]["snp"]                    # 1184 bytes
 r = subprocess.run(["u2f-enclave", "verify"], input=report,
                    capture_output=True, text=True)
 bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
 ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
 ```
 
-On the wire it looks like:
-
-```console
-$ u2f-enclave verify < report.bin
-report_data   8b62bb32e6605accd748ecfee6922874…   ← == SHA-512(authData||cdh)?
-measurement   70eabebbf79908ce…  ok
-policy        0x30000  ok
-chip_id       f59a25d8302ed76a
-reported_tcb  0x581b00000000000a
-vcek_sig      ok
-$ echo $?
-0
-```
-
-The VCEK is fetched from AMD's KDS once and cached under
-`$XDG_CACHE_HOME`; for air-gapped use, pass `--vcek FILE`. Runs on any
+The certificate is fetched from AMD once and cached under
+`$XDG_CACHE_HOME`; pass `--vcek FILE` to supply it yourself. Runs on any
 x86_64 Linux box; same binary, no AMD hardware needed.
 
 **Why keys survive a restart:** the authenticator never stores its
-master secret. On every launch it asks the PSP to re-derive it from the
-chip's fused key and the launch measurement. Same binary on the same
-chip gives the same secret back; change either and old credentials just
-stop working. No sealed blobs, no host-side state, nothing to back up.
+master secret. On every launch it asks the chip to re-derive it from a
+key burned into the silicon plus the launch measurement. Same binary on
+the same chip gives the same secret back; change either and old
+credentials just stop working. No encrypted state files, no host-side
+storage, nothing to back up.
 
 
 ## Status
@@ -218,13 +205,12 @@ stop working. No sealed blobs, no host-side state, nothing to back up.
 ```bash
 nix develop          # rust toolchain with x86_64-unknown-none + libfido2
 cargo build --release -p vmm     # → target/release/u2f-enclave
-cargo test                        # unit + e2e (libfido2, OpenSSH, SNP RP)
+cargo test                        # unit + e2e (libfido2, OpenSSH, attestation)
 ```
 
 Tests that need `/dev/kvm`, `/dev/uhid`, `/dev/vhost-vsock` or `/dev/sev`
-print `SKIP` and pass if those are not writable; the SNP attestation test
-soft-skips its signature check if AMD KDS is unreachable (cert cached after
-first fetch). No-KVM dev loop: `cargo run -p sim & cargo run -p bridge`.
+print `SKIP` and pass if those are not writable. No-KVM dev loop:
+`cargo run -p sim & cargo run -p bridge`.
 
 ## References
 
