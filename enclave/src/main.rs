@@ -26,9 +26,9 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
 static ALLOC: LockedHeap = LockedHeap::empty();
 
-/// ELF entry. Under plain QEMU `-kernel` this is reached via the PVH stub
-/// (TODO); under SEV-SNP via the IGVM-described initial VMSA. Either way we
-/// arrive in 64-bit mode with a usable stack.
+/// ELF entry. Not yet reachable: the PVH stub (stage 1) / IGVM initial VMSA
+/// (stage 2) that establish 64-bit mode and a stack before jumping here are
+/// still to come. See `DESIGN.md`.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // SAFETY: single-threaded, runs once before any allocation.
