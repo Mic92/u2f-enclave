@@ -148,7 +148,11 @@ result depends on the page contents and addresses only.
 
 If the computation is wrong, `verify` rejects valid reports; it can't
 accept an invalid one because the PSP only signs what it actually
-measured. `e2e::libfido2_vmm_snp` checks the computation against a real
+measured. The TDREPORT case is weaker: it carries a MAC keyed on a
+CPU-internal secret, not a signature, so a remote verifier cannot check
+it at all without a Quote (which needs the host's SGX quoting enclave).
+`verify` on a 1024-byte input therefore checks MRTD only and prints a
+warning. `e2e::libfido2_vmm_snp` checks the computation against a real
 chip on every run; it has matched on Milan and Genoa across kernels 6.11
 and 6.18 (the measurement is chip- and host-kernel-independent). When it
 fails, dump KVM's actual VMSA and diff against `measure::vmsa_page`:

@@ -34,29 +34,26 @@ fn libfido2_vmm_tdx() {
     let be = vmm_backend("--tdx");
     fido2_roundtrip(&be.hidraw);
 
-    // attStmt["tdx"] = 1024-byte TDREPORT. The MAC is only locally
-    // verifiable, so no signature check here — only the binding.
     let cdh = [0x22u8; 32];
     let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "tdx");
     assert_eq!(rep.len(), 1024);
+
+    // Documented user flow. TDREPORT MAC is not remotely checkable, so
+    // exit 0 proves predictor==module (a TDX-module or KVM ordering change
+    // shows up as exit 1, not silent drift) — not a hardware signature.
+    let out = pipe(
+        Command::new(host_bin("u2f-enclave"))
+            .arg("verify")
+            .stderr(std::process::Stdio::inherit()),
+        &rep,
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    eprint!("{stdout}");
+    assert!(out.status.success(), "u2f-enclave verify (tdx) failed");
+
     use sha2::Digest;
     let want_rd: [u8; 64] = sha2::Sha512::digest([ad.as_slice(), &cdh].concat()).into();
     assert_eq!(&rep[128..192], &want_rd[..], "report_data not bound");
-    let mrtd: String = rep[528..576].iter().map(|b| format!("{b:02x}")).collect();
-    eprintln!("MRTD  {mrtd}");
-
-    // Predictor == module: a TDX-module or KVM ordering change shows up
-    // as exit failure here, not silent drift.
-    let out = Command::new(host_bin("u2f-enclave"))
-        .arg("--measure")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let predicted = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("tdx  "))
-        .expect("--measure has no tdx line");
-    assert_eq!(mrtd, predicted, "offline MRTD != module MRTD");
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via

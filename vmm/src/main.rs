@@ -35,18 +35,19 @@ Usage:
                                      /dev/hidraw* device via uhid
   u2f-enclave --measure              print this build's SNP and TDX launch
                                      measurements and exit
-  u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
-                                     check its VCEK signature and that its
-                                     measurement matches this build; print
-                                     report_data for the caller's binding
-                                     check; exit 0 iff ok
+  u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP or 1024-byte TDX
+                                     report on stdin; check its measurement
+                                     matches this build (and, for SNP, its
+                                     VCEK signature); print report_data for
+                                     the caller's binding check; exit 0 iff
+                                     ok. TDX: see warning in output
   u2f-enclave vcek-url               read a report on stdin, print the AMD
                                      URL to fetch its chip's certificate
   u2f-enclave attest [DEVICE]        demo client: register a credential on
                                      the local hidraw device, check the
-                                     report binds it, write the 1184-byte
-                                     report to stdout (e.g. > report.bin,
-                                     then `verify` it on another machine)
+                                     report binds it, write the report to
+                                     stdout (e.g. > report.bin, then
+                                     `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   --tdx        launch under Intel TDX (encrypted+measured)
@@ -80,7 +81,8 @@ fn main() -> io::Result<()> {
             eprint!("{USAGE}");
             std::process::exit(2);
         }
-        std::process::exit(verify::cmd(vcek, expected_measurement()?));
+        let (snp, tdx) = expected_digests()?;
+        std::process::exit(verify::cmd(vcek, snp, tdx));
     }
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();
@@ -350,16 +352,13 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
         })
 }
 
-fn expected_measurement() -> io::Result<[u8; 48]> {
+fn expected_digests() -> io::Result<([u8; 48], [u8; 48])> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
-    Ok(measure::launch_digest(
-        &mem,
-        img.lo,
-        img.hi,
-        snp::SECRETS_GPA,
-        &vmsa,
+    Ok((
+        measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa),
+        measure::mrtd(&mem, img.lo, img.hi, &img.reset),
     ))
 }
 

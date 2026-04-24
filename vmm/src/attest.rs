@@ -1,10 +1,10 @@
 //! `u2f-enclave attest`: CLI stand-in for a WebAuthn client. Issues a
-//! `makeCredential` over raw hidraw, pulls `attStmt["snp"]`, does the
-//! credential-binding check (the one `verify` leaves to the caller), and
-//! writes the 1184-byte report to stdout so it pipes into `verify`.
+//! `makeCredential` over raw hidraw, pulls `attStmt["snp"]`/`["tdx"]`,
+//! does the credential-binding check (the one `verify` leaves to the
+//! caller), and writes the raw report to stdout so it pipes into `verify`.
 //!
 //! Not a security boundary — this is the *client* side. Useful for demoing
-//! the full flow on a headless SNP host without a browser.
+//! the full flow on a headless host without a browser.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -15,7 +15,7 @@ use ctap::cbor::{Reader, Writer};
 use ctap::hid;
 use sha2::{Digest, Sha512};
 
-use crate::verify::{hex, REPORT_LEN};
+use crate::verify::{hex, REPORT_LEN, TDREPORT_LEN};
 
 const HID_NAME: &str = "u2f-enclave";
 
@@ -23,9 +23,7 @@ pub fn cmd(dev: Option<String>) -> i32 {
     let dev = match dev.map(PathBuf::from).or_else(find_hidraw) {
         Some(p) => p,
         None => {
-            eprintln!(
-                "attest: no '{HID_NAME}' hidraw device found; is `u2f-enclave --snp` running?"
-            );
+            eprintln!("attest: no '{HID_NAME}' hidraw device found; is `u2f-enclave` running?");
             return 2;
         }
     };
@@ -36,27 +34,34 @@ pub fn cmd(dev: Option<String>) -> i32 {
         .and_then(|mut f| f.read_exact(&mut cdh))
         .expect("urandom");
 
-    let (auth_data, snp) = match make_credential(&dev, &cdh, "localhost") {
+    let (auth_data, key, rep) = match make_credential(&dev, &cdh, "localhost") {
         Ok(v) => v,
         Err(e) => {
             eprintln!("attest: {e}");
             return 2;
         }
     };
-    if snp.len() != REPORT_LEN {
-        eprintln!(
-            "attest: response has no attStmt[\"snp\"] (got {} bytes); \
-             the authenticator is not running under --snp",
-            snp.len()
-        );
-        return 1;
-    }
+    let rd = match (key, rep.len()) {
+        ("snp", REPORT_LEN) => &rep[0x50..0x90],
+        ("tdx", TDREPORT_LEN) => &rep[128..192],
+        ("", _) => {
+            eprintln!(
+                "attest: response has no attStmt[\"snp\"] or [\"tdx\"]; \
+                 the authenticator is not running under --snp/--tdx"
+            );
+            return 1;
+        }
+        (k, n) => {
+            eprintln!("attest: attStmt[{k:?}] has unexpected length {n}");
+            return 1;
+        }
+    };
+    eprintln!("attest: report kind  {key} ({} bytes)", rep.len());
 
     let mut h = Sha512::new();
     h.update(&auth_data);
     h.update(cdh);
     let bind = h.finalize();
-    let rd = &snp[0x50..0x90];
     let bound = rd == &bind[..];
     eprintln!(
         "attest: report_data {} SHA-512(authData||cdh){}",
@@ -65,7 +70,7 @@ pub fn cmd(dev: Option<String>) -> i32 {
     );
     eprintln!("attest: cred_id      {}", hex(cred_id(&auth_data)));
 
-    io::stdout().write_all(&snp).expect("stdout");
+    io::stdout().write_all(&rep).expect("stdout");
     if bound {
         0
     } else {
@@ -108,7 +113,11 @@ impl Hid {
     }
 }
 
-fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> io::Result<(Vec<u8>, Vec<u8>)> {
+fn make_credential(
+    dev: &Path,
+    cdh: &[u8; 32],
+    rp: &str,
+) -> io::Result<(Vec<u8>, &'static str, Vec<u8>)> {
     let mut w = Writer::new();
     w.map(4);
     w.unsigned(1);
@@ -138,25 +147,25 @@ fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> io::Result<(Vec<u8>,
     parse(&resp[1..]).ok_or_else(|| io::Error::other("malformed makeCredential response"))
 }
 
-fn parse(body: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+fn parse(body: &[u8]) -> Option<(Vec<u8>, &'static str, Vec<u8>)> {
     let mut rd = Reader::new(body);
-    let (mut ad, mut snp) = (Vec::new(), Vec::new());
+    let (mut ad, mut key, mut rep) = (Vec::new(), "", Vec::new());
     for _ in 0..rd.map().ok()? {
         match rd.unsigned().ok()? {
             2 => ad = rd.bytes().ok()?.to_vec(),
             3 => {
                 for _ in 0..rd.map().ok()? {
-                    if rd.text().ok()? == "snp" {
-                        snp = rd.bytes().ok()?.to_vec();
-                    } else {
-                        rd.skip().ok()?;
+                    match rd.text().ok()? {
+                        "snp" => (key, rep) = ("snp", rd.bytes().ok()?.to_vec()),
+                        "tdx" => (key, rep) = ("tdx", rd.bytes().ok()?.to_vec()),
+                        _ => rd.skip().ok()?,
                     }
                 }
             }
             _ => rd.skip().ok()?,
         }
     }
-    Some((ad, snp))
+    Some((ad, key, rep))
 }
 
 fn cred_id(auth_data: &[u8]) -> &[u8] {
