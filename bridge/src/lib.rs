@@ -1,7 +1,7 @@
 //! Expose a remote CTAP-HID stream as a local `/dev/hidraw*` via `/dev/uhid`.
 //!
 //! Shipped as a lib so the standalone `bridge` binary (consumer-VM use case)
-//! and the all-in-one `vmm` (host use case) share the exact same loop.
+//! and the all-in-one `host` binary share the exact same loop.
 
 #![cfg(target_os = "linux")]
 

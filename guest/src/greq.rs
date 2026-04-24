@@ -4,7 +4,7 @@
 //! launch; every request/response is wrapped with one so the hypervisor
 //! can forward but not read or forge. KVM handles the NAE event entirely
 //! in-kernel (`snp_handle_guest_req`: `kvm_read_guest` → PSP →
-//! `kvm_write_guest`), so the vmm sees nothing.
+//! `kvm_write_guest`), so the host sees nothing.
 //!
 //! Refs: SNP firmware ABI §7 (guest messages), §8.14 (secrets page); Linux
 //! `arch/x86/coco/sev/core.c::enc_payload`/`verify_and_dec_payload`.
@@ -16,7 +16,7 @@ use aes_gcm::{Aes256Gcm, KeyInit};
 
 use crate::sev::{self, Page};
 
-/// Fixed GPA where the vmm injects `SNP_PAGE_TYPE_SECRETS`. Sits below 1 MiB
+/// Fixed GPA where the host injects `SNP_PAGE_TYPE_SECRETS`. Sits below 1 MiB
 /// (outside the loaded ELF) and inside the 2 MiB PT0 window.
 const SECRETS_GPA: u64 = 0x1000;
 const VMPCK0_OFF: usize = 32; // version,flags,fms,rsvd,gosvw[16] precede it

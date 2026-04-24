@@ -1,4 +1,4 @@
-//! Minimal KVM launcher for the enclave unikernel.
+//! Minimal KVM launcher for the guest unikernel.
 //!
 //! Loads the ELF, places the vCPU in the PVH initial state (32-bit protected
 //! mode, flat segments, paging off, EIP = PHYS32_ENTRY), and runs it.
@@ -24,7 +24,7 @@ const MEM_SIZE: usize = 8 * 1024 * 1024;
 const COM1: u16 = 0x3f8;
 const DEBUG_EXIT: u16 = 0xf4;
 
-static ENCLAVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/enclave"));
+static GUEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest"));
 
 const USAGE: &str = "\
 FIDO2/CTAP2 authenticator running as a confidential VM.
@@ -145,7 +145,7 @@ fn main() -> io::Result<()> {
         None
     };
 
-    let img = elf::load(ENCLAVE, mem_slice)?;
+    let img = elf::load(GUEST_ELF, mem_slice)?;
 
     // vhost reads rings/buffers via the anon mmap; under SNP that is the
     // shared half of the memslot, so no special handling.
@@ -319,7 +319,7 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
 
 fn expected_measurement() -> io::Result<[u8; 48]> {
     let mut mem = vec![0u8; MEM_SIZE];
-    let img = elf::load(ENCLAVE, &mut mem)?;
+    let img = elf::load(GUEST_ELF, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
     Ok(measure::launch_digest(
         &mem,
@@ -334,7 +334,7 @@ fn expected_measurement() -> io::Result<[u8; 48]> {
 /// (composes with shell tooling), context to stderr.
 fn print_measure() -> io::Result<()> {
     let mut mem = vec![0u8; MEM_SIZE];
-    let img = elf::load(ENCLAVE, &mut mem)?;
+    let img = elf::load(GUEST_ELF, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
 

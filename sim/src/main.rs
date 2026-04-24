@@ -2,9 +2,9 @@
 //!
 //! Speaks raw 64-byte CTAPHID reports over either a Unix stream socket
 //! (default, for local dev) or AF_VSOCK (`vsock:PORT`), which is the exact
-//! transport the real enclave uses. The wire format is identical so `bridge`
+//! transport the real guest uses. The wire format is identical so `bridge`
 //! works against any of the three: this simulator, a loopback vsock, or the
-//! enclave guest.
+//! guest.
 
 use ctap::{Authenticator, Platform, Report, AAGUID, HID_REPORT_SIZE};
 use std::io::{self, Read, Write};
@@ -66,7 +66,7 @@ fn serve<S: Read + Write>(mut stream: S, master: [u8; 32]) {
 fn main() -> io::Result<()> {
     // Ephemeral per-process secret: registrations only survive as long as the
     // simulator does, which is exactly the isolation guarantee we want for a
-    // host-side stand-in. The real enclave provisions this via attestation.
+    // host-side stand-in. The real guest provisions this via attestation.
     let mut master = [0u8; 32];
     getrandom::getrandom(&mut master).expect("getrandom");
 

@@ -211,15 +211,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclave"
-version = "0.0.1"
-dependencies = [
- "aes-gcm",
- "ctap",
- "linked_list_allocator",
-]
-
-[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,12 +264,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest"
+version = "0.0.1"
+dependencies = [
+ "aes-gcm",
+ "ctap",
+ "linked_list_allocator",
+]
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "host"
+version = "0.0.1"
+dependencies = [
+ "bridge",
+ "ctap",
+ "libc",
+ "p384",
+ "sha2",
+ "vsock",
 ]
 
 [[package]]
@@ -488,18 +500,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vmm"
-version = "0.0.1"
-dependencies = [
- "bridge",
- "ctap",
- "libc",
- "p384",
- "sha2",
- "vsock",
-]
 
 [[package]]
 name = "vsock"

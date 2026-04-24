@@ -2,7 +2,7 @@
 //!
 //! Two call paths for the same operations: plain VM (raw instructions) and
 //! SEV-SNP (GHCB). Callers use these wrappers; KVM normalises both to
-//! ordinary `KVM_EXIT_IO`/`_MMIO` so the vmm doesn't care which is in use.
+//! ordinary `KVM_EXIT_IO`/`_MMIO` so the host doesn't care which is in use.
 
 use core::arch::asm;
 

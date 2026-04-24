@@ -4,7 +4,7 @@
 //! over it. SEV-SNP (paravirt GHCB, attestation) is layered on top — see
 //! `DESIGN.md`.
 //!
-//! Build: `cargo build -p enclave --target x86_64-unknown-none --release`
+//! Build: `cargo build -p guest --target x86_64-unknown-none --release`
 
 #![no_std]
 #![no_main]
@@ -72,7 +72,7 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     }
 }
 
-/// Signal exit via the isa-debug-exit port; the vmm turns this into a
+/// Signal exit via the isa-debug-exit port; the host turns this into a
 /// process exit code of `(code << 1) | 1`. Falls back to `hlt` if nobody is
 /// listening.
 fn debug_exit(code: u32) -> ! {

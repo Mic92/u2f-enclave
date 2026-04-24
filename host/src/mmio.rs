@@ -1,5 +1,5 @@
 //! virtio-mmio v2 register window for the vsock device. Only the registers
-//! the enclave's `virtio.rs` actually touches are implemented; everything
+//! the guest's `virtio.rs` actually touches are implemented; everything
 //! else reads as 0. State is captured per queue and pushed into vhost when
 //! the guest writes QUEUE_READY / DRIVER_OK.
 

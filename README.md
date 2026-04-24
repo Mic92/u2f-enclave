@@ -165,9 +165,9 @@ storage, nothing to back up.
 | crate    | target            | purpose                                                            |
 | -------- | ----------------- | ------------------------------------------------------------------ |
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
-| `enclave`| `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `vmm`. See [DESIGN.md](enclave/DESIGN.md). |
-| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest`/`vcek-url` subcommands. |
-| `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `vmm` for the local case. |
+| `guest`  | `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `host`. See [DESIGN.md](guest/DESIGN.md). |
+| `host`   | std (Linux)       | Builds the `u2f-enclave` binary: embeds the guest ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest`/`vcek-url` subcommands. |
+| `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `host` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
 
@@ -189,7 +189,7 @@ protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
 
 ```bash
 nix develop          # rust toolchain with x86_64-unknown-none + libfido2
-cargo build --release -p vmm     # → target/release/u2f-enclave
+cargo build --release -p host    # → target/release/u2f-enclave
 cargo test                        # unit + e2e (libfido2, OpenSSH, attestation)
 ```
 

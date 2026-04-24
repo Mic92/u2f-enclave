@@ -1,7 +1,7 @@
 /* 32-bit PVH entry → long mode. Runs with paging off, flat 4 GiB segments,
- * %ebx = hvm_start_info (ignored), %esi = SEV C-bit position from the vmm
+ * %ebx = hvm_start_info (ignored), %esi = SEV C-bit position from the host
  * (0 = not SEV; the guest cannot safely probe this itself: rdmsr SEV_STATUS
- * #GPs on non-SEV silicon and CPUID #VCs under SEV-ES). A lying vmm just
+ * #GPs on non-SEV silicon and CPUID #VCs under SEV-ES). A lying host just
  * crashes the guest either way — fail-closed.
  *
  * Identity-maps [0, 4 GiB) with four 1 GiB pages, enables PAE+LME+PG, loads

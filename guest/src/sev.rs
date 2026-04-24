@@ -131,7 +131,7 @@ fn die(_why: &str) -> ! {
 /// Refine page tables to 4 KiB for [0, 2 MiB), flip the GHCB page to shared,
 /// and register it.
 pub fn init(c_bit: u32) {
-    let _ = rdmsr(MSR_SEV_STATUS); // #GP-triple-faults if vmm lied about SEV.
+    let _ = rdmsr(MSR_SEV_STATUS); // #GP-triple-faults if host lied about SEV.
     let c = 1u64 << c_bit;
     boot::refine_low_2m(c);
 
@@ -222,7 +222,7 @@ fn ghcb_exit() {
 // --- paravirt port I/O ----------------------------------------------------
 //
 // Under SEV-ES KVM forwards `SVM_EXIT_IOIO` to its regular `io_interception`
-// handler, which surfaces as plain `KVM_EXIT_IO` — the vmm's existing serial
+// handler, which surfaces as plain `KVM_EXIT_IO` — the host's existing serial
 // / debug-exit emulation works unchanged.
 
 fn ioio(port: u16, dbits: u64, is_in: bool, val: u64) -> u64 {
@@ -250,7 +250,7 @@ pub fn outl(port: u16, v: u32) {
 //
 // `SVM_VMGEXIT_MMIO_*` shuttle data via `sw_scratch` → GHCB `shared_buffer`;
 // KVM forwards to `kvm_sev_es_mmio_*` which surfaces as plain `KVM_EXIT_MMIO`,
-// so the vmm's virtio-mmio emulation is again unchanged.
+// so the host's virtio-mmio emulation is again unchanged.
 
 fn ghcb_scratch() -> u64 {
     addr_of!(GHCB) as u64 + GHCB_SHARED_BUF as u64
@@ -274,7 +274,7 @@ pub fn mmio_write32(gpa: u64, v: u32) {
 
 /// `SNP_GUEST_REQUEST`: KVM copies `req_gpa` to the PSP and the PSP's reply
 /// to `resp_gpa`, both via the memslot's shared half. Returns `exit_info_2`
-/// (`fw_err` low 32, vmm err high 32; 0 = success).
+/// (`fw_err` low 32, host err high 32; 0 = success).
 pub fn guest_request(req_gpa: u64, resp_gpa: u64) -> u64 {
     ghcb_begin(SVM_VMGEXIT_GUEST_REQUEST, req_gpa, resp_gpa);
     ghcb_exit();

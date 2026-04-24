@@ -11,7 +11,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use crate::pv;
 use core::sync::atomic::{compiler_fence, Ordering};
 
-/// Where `vmm` places the single virtio-mmio window (and where QEMU microvm
+/// Where `host` places the single virtio-mmio window (and where QEMU microvm
 /// happens to put slot 0 too, which is why we picked it).
 pub const MMIO_BASE: usize = 0xfeb0_0000;
 

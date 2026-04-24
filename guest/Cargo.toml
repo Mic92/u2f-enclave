@@ -1,5 +1,5 @@
 [package]
-name = "enclave"
+name = "guest"
 description = "Bare-metal SEV-SNP guest that runs the ctap authenticator"
 version.workspace = true
 edition.workspace = true

@@ -49,7 +49,7 @@ fn cargo(args: &[&str]) {
 
 pub fn host_bin(name: &str) -> PathBuf {
     static ONCE: Once = Once::new();
-    // vmm's build.rs cross-builds and embeds the enclave ELF.
+    // host's build.rs cross-builds and embeds the guest ELF.
     ONCE.call_once(|| {
         cargo(&[
             "build",
@@ -59,7 +59,7 @@ pub fn host_bin(name: &str) -> PathBuf {
             "-p",
             "bridge",
             "-p",
-            "vmm",
+            "host",
         ])
     });
     target_dir().join("release").join(name)
@@ -166,7 +166,7 @@ fn find_hidraw() -> PathBuf {
 }
 
 /// Kill-on-drop child set. Constructors push as they spawn so a panic during
-/// bring-up (e.g. `find_hidraw` timing out) does not leak the vmm holding the
+/// bring-up (e.g. `find_hidraw` timing out) does not leak a process holding the
 /// vsock CID.
 #[derive(Default)]
 pub struct Procs(Vec<Child>);
@@ -217,7 +217,7 @@ pub fn sim_backend() -> Backend {
 }
 
 pub fn vmm_backend(coco: &str) -> Backend {
-    let tmp = Tmp::new("vmm");
+    let tmp = Tmp::new("host");
     let mut procs = Procs::default();
     let mut cmd = Command::new(host_bin("u2f-enclave"));
     if !coco.is_empty() {

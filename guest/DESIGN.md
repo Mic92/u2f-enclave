@@ -1,13 +1,13 @@
 # Enclave design
 
-`x86_64-unknown-none` ELF that the `vmm` crate embeds and launches as a
+`x86_64-unknown-none` ELF that the `host` crate embeds and launches as a
 single-vCPU SEV-SNP guest. ~145 KB `.text`; the on-disk ELF is ~490 KB
 because `.bss`/`.stack` sit in PT_LOAD so they are part of the measured
 launch image.
 
 ## Threat model
 
-The host kernel, KVM, the `vmm` process, vhost-vsock and everything on the
+The host kernel, KVM, the `host` process, vhost-vsock and everything on the
 vsock wire are the adversary. The AMD PSP firmware, CPU silicon (memory
 encryption, RMP, `RDRAND`, `PVALIDATE`) and the ARK/ASK/VCEK key chain are
 trusted. The goal is that a credential private key can only be exercised by
@@ -31,8 +31,8 @@ trigger `#VC`. That removes the IDT, exception-frame asm, and instruction
 decoder from the TCB; `sev.rs` is ~300 LoC.
 
 KVM forwards `SVM_EXIT_IOIO` and `SVM_VMGEXIT_MMIO_{READ,WRITE}` to its
-ordinary handlers, which surface to the `vmm` as plain `KVM_EXIT_IO` /
-`KVM_EXIT_MMIO`. The `vmm`'s emulation loop is therefore identical for
+ordinary handlers, which surface to the `host` as plain `KVM_EXIT_IO` /
+`KVM_EXIT_MMIO`. The `host`'s emulation loop is therefore identical for
 plain-KVM and SNP guests.
 
 ## Memory layout
@@ -49,7 +49,7 @@ GPA 0xfeb0_0000   virtio-mmio register window (host-emulated, GHCB-MMIO)
 All RAM is identity-mapped (4×1 GiB leaves) so VA = GPA; `sev::init()`
 refines `[0, 2 MiB)` to 4 KiB so individual pages can have C=0. A page is
 made shared by `PVALIDATE`-rescind → MSR-protocol PSC → clear the C-bit;
-the `vmm` answers the resulting `KVM_HC_MAP_GPA_RANGE` with
+the `host` answers the resulting `KVM_HC_MAP_GPA_RANGE` with
 `KVM_SET_MEMORY_ATTRIBUTES` and KVM does the RMPUPDATE.
 
 ## Shared-page discipline
@@ -70,7 +70,7 @@ construction (separate Rust statics / linker sections).
 
 ## Boot
 
-PVH: the `vmm` programs the vCPU's `KVM_SET_{REGS,SREGS,CPUID2}` to PVH
+PVH: the `host` programs the vCPU's `KVM_SET_{REGS,SREGS,CPUID2}` to PVH
 initial state and points `rip` at the 32-bit trampoline; under SNP, KVM's
 `LAUNCH_FINISH` builds the VMSA from those same registers, so one boot
 path serves both. The trampoline OR-s the C-bit (passed in `%esi`,
@@ -80,7 +80,7 @@ the 1 GiB PTEs and jumps to 64-bit Rust. No firmware, no IGVM.
 ## vsock
 
 Hand-rolled modern virtio-mmio transport + 8-entry split virtqueues,
-polling, single STREAM connection. The `vmm` emulates the register window
+polling, single STREAM connection. The `host` emulates the register window
 and hands the virtqueues to `/dev/vhost-vsock`; vhost reads rings via the
 anonymous userspace mapping that backs the shared half of the guest_memfd
 memslot, so the SNP data path needs no special handling. CTAPHID frames are
@@ -88,7 +88,7 @@ memslot, so the SNP data path needs no special handling. CTAPHID frames are
 
 ## PSP messaging (`greq.rs`)
 
-The `vmm` injects an `SNP_PAGE_TYPE_SECRETS` page at GPA `0x1000`; the PSP
+The `host` injects an `SNP_PAGE_TYPE_SECRETS` page at GPA `0x1000`; the PSP
 fills it with VMPCK0..3 at launch. `greq` reads VMPCK0, AES-256-GCM-wraps a
 request, and issues `SVM_VMGEXIT_GUEST_REQUEST`, which KVM handles entirely
 in-kernel (`kvm_read_guest` → PSP ring → `kvm_write_guest`).

@@ -229,7 +229,7 @@ impl Vsock {
 // far too large for our 32 KiB stack, so it lives in BSS.
 static mut INSTANCE: Vsock = Vsock::empty();
 
-/// Probe the MMIO slot the vmm sets up and bring the device up.
+/// Probe the MMIO slot the host sets up and bring the device up.
 pub fn init(port: u32) -> Option<&'static mut Vsock> {
     let m = Mmio::new(MMIO_BASE as u64);
     if m.probe() != Some(DEVICE_ID_VSOCK) {

@@ -27,7 +27,7 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          # The enclave crate targets bare metal; nixpkgs' rustc does not ship
+          # The guest crate targets bare metal; nixpkgs' rustc does not ship
           # core/alloc for x86_64-unknown-none, so pull a stable toolchain
           # that does.
           rust = pkgs.rust-bin.stable.latest.default.override {
