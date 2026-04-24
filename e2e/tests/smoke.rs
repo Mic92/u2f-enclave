@@ -33,6 +33,19 @@ fn libfido2_vmm_tdx() {
     }
     let be = vmm_backend("--tdx");
     fido2_roundtrip(&be.hidraw);
+
+    // attStmt["tdx"] = 1024-byte TDREPORT, with report_data binding this
+    // registration. The MAC is only locally verifiable, so this checks the
+    // binding and that MRTD is populated, not a signature.
+    let cdh = [0x22u8; 32];
+    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "tdx");
+    assert_eq!(rep.len(), 1024);
+    use sha2::Digest;
+    let want_rd: [u8; 64] = sha2::Sha512::digest([ad.as_slice(), &cdh].concat()).into();
+    assert_eq!(&rep[128..192], &want_rd[..], "report_data not bound");
+    let mrtd: String = rep[528..576].iter().map(|b| format!("{b:02x}")).collect();
+    assert_ne!(rep[528..576], [0u8; 48]);
+    eprintln!("MRTD  {mrtd}");
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
@@ -55,7 +68,8 @@ fn libfido2_vmm_snp() {
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x11u8; 32];
-    let (ad, rep) = snp::make_credential(&be.hidraw, &cdh, "example.org");
+    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
+    assert_eq!(rep.len(), 1184);
 
     // Documented user flow: vcek-url → curl → verify --vcek.
     let url = pipe(Command::new(host_bin("u2f-enclave")).arg("vcek-url"), &rep);
@@ -103,14 +117,14 @@ fn libfido2_vmm_snp() {
     let m1 = rep[0x90..0xc0].to_vec();
     drop(be);
     let be = vmm_backend("--snp");
-    let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");
+    let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
     assert_eq!(
         &rep2[0x90..0xc0],
         m1,
         "measurement not stable across launches"
     );
     assert_eq!(
-        snp::get_assertion(&be.hidraw, &cdh, "example.org", snp::cred_id(&ad)),
+        coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
         0,
         "launch-1 credential did not resolve after relaunch"
     );

@@ -10,7 +10,7 @@
 //! `intel/tdx-module/src/common/data_structures/td_vmcs_init.c`.
 
 use core::arch::asm;
-use core::ptr::write_volatile;
+use core::ptr::{addr_of_mut, write_volatile};
 use core::sync::atomic::{compiler_fence, Ordering};
 
 use crate::boot;
@@ -159,4 +159,46 @@ pub fn mmio_read32(gpa: u64) -> u32 {
 #[inline]
 pub fn mmio_write32(gpa: u64, v: u32) {
     mmio(1, gpa, v as u64);
+}
+
+// --- TDG.MR.REPORT -------------------------------------------------------
+
+const TDG_MR_REPORT: u64 = 4;
+pub const REPORT_LEN: usize = 1024;
+
+#[repr(align(1024))]
+struct TdReport([u8; REPORT_LEN]);
+#[repr(align(64))]
+struct ReportData([u8; 64]);
+static mut TDREPORT: TdReport = TdReport([0; REPORT_LEN]);
+static mut RD: ReportData = ReportData([0; 64]);
+
+/// Ask the TDX module for a TDREPORT bound to `user_data`. Runs entirely in
+/// private memory (module call, no host involvement). The result's MAC is
+/// only locally verifiable; turning it into a remotely-verifiable Quote
+/// needs a host-side quoting service, which we don't depend on.
+pub fn report(user_data: &[u8; 64]) -> Option<[u8; REPORT_LEN]> {
+    let rd = unsafe { addr_of_mut!(RD.0) };
+    let rep = unsafe { addr_of_mut!(TDREPORT.0) };
+    unsafe { rd.write(*user_data) };
+    compiler_fence(Ordering::Release);
+    let mut rax = TDG_MR_REPORT;
+    // Module ABI may scratch rcx/rdx/r8–r11; Linux's __tdcall treats them
+    // all as caller-saved.
+    unsafe {
+        asm!(
+            "tdcall",
+            inout("rax") rax,
+            inout("rcx") rep as u64 => _,
+            inout("rdx") rd as u64 => _,
+            inout("r8") 0u64 => _,
+            out("r9") _, out("r10") _, out("r11") _,
+            options(nostack),
+        );
+    }
+    compiler_fence(Ordering::Acquire);
+    if rax != 0 {
+        return None;
+    }
+    Some(unsafe { rep.read() })
 }

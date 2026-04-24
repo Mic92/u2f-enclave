@@ -13,7 +13,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
-pub mod snp;
+pub mod coco;
 
 static LOCK: Mutex<()> = Mutex::new(());
 

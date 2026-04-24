@@ -1,6 +1,5 @@
-//! Raw CTAPHID-over-hidraw driver so the test can read `attStmt["snp"]`,
-//! which stock libfido2 ignores. Verifying the report is `u2f-enclave
-//! verify`'s job; this module only produces it.
+//! Raw CTAPHID-over-hidraw driver so the test can read the
+//! `attStmt["snp"]`/`attStmt["tdx"]` entry that stock libfido2 ignores.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -8,8 +7,6 @@ use std::path::Path;
 
 use ctap::cbor::Reader;
 use ctap::hid;
-
-pub const REPORT_LEN: usize = 1184;
 
 /// Minimal CTAPHID client over Linux hidraw: write 65 (leading report-id 0),
 /// read 64.
@@ -51,9 +48,9 @@ impl Hid {
     }
 }
 
-/// Issue a `makeCredential` and return `(authData, snp_report)`. Panics if
-/// the response carries no `"snp"` key — that is the property under test.
-pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8>) {
+/// Issue a `makeCredential` and return `(authData, attStmt[key])`. Panics
+/// if `key` is absent — that is the property under test.
+pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str, key: &str) -> (Vec<u8>, Vec<u8>) {
     use ctap::cbor::Writer;
     let mut w = Writer::new();
     w.map(4);
@@ -83,7 +80,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
 
     let mut rd = Reader::new(&resp[1..]);
     let mut auth_data = Vec::new();
-    let mut snp = Vec::new();
+    let mut rep = Vec::new();
     let n = rd.map().unwrap();
     for _ in 0..n {
         match rd.unsigned().unwrap() {
@@ -91,8 +88,8 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
             3 => {
                 let m = rd.map().unwrap();
                 for _ in 0..m {
-                    if rd.text().unwrap() == "snp" {
-                        snp = rd.bytes().unwrap().to_vec();
+                    if rd.text().unwrap() == key {
+                        rep = rd.bytes().unwrap().to_vec();
                     } else {
                         rd.skip().unwrap();
                     }
@@ -101,8 +98,8 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
             _ => rd.skip().unwrap(),
         }
     }
-    assert_eq!(snp.len(), REPORT_LEN, "no/short snp report in attStmt");
-    (auth_data, snp)
+    assert!(!rep.is_empty(), "no {key:?} in attStmt");
+    (auth_data, rep)
 }
 
 /// Issue a `getAssertion` for `cred_id`; returns the CTAP2 status byte.

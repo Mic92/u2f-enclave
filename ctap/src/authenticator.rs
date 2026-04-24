@@ -14,11 +14,11 @@ pub trait Platform {
     /// In the simulator this is random-at-boot; under SEV-SNP it is the
     /// PSP-derived key bound to the launch measurement.
     fn master_secret(&self) -> [u8; 32];
-    /// Hardware attestation evidence to embed in `attStmt` (`"snp"` key),
-    /// or `None` to fall back to plain self-attestation. `report_data` is
-    /// `SHA-512(authData || clientDataHash)` so the evidence binds to this
-    /// exact registration.
-    fn attestation(&mut self, report_data: &[u8; 64]) -> Option<Vec<u8>> {
+    /// Hardware attestation evidence to embed in `attStmt` under `key`
+    /// (`"snp"`/`"tdx"`), or `None` for plain self-attestation.
+    /// `report_data` is `SHA-512(authData || clientDataHash)` so the
+    /// evidence binds to this exact registration.
+    fn attestation(&mut self, report_data: &[u8; 64]) -> Option<(&'static str, Vec<u8>)> {
         let _ = report_data;
         None
     }

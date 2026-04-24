@@ -142,7 +142,7 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     let sig: p256::ecdsa::Signature = c.sk.sign(&to_sign);
     let sig = cred::der_ecdsa(&sig.to_bytes().into());
 
-    let snp = ctx.platform.attestation(&Sha512::digest(&to_sign).into());
+    let coco = ctx.platform.attestation(&Sha512::digest(&to_sign).into());
 
     let mut w = Writer::with_prefix(status::OK);
     w.map(3);
@@ -152,15 +152,15 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     w.bytes(&ad);
     w.unsigned(3);
     // Stays `"packed"` so stock libfido2/WebAuthn verifiers accept the
-    // self-attestation; an SNP-aware verifier additionally checks the
-    // (spec-ignored) `"snp"` entry.
-    w.map(if snp.is_some() { 3 } else { 2 });
+    // self-attestation; a hardware-aware verifier additionally checks the
+    // extra `"snp"`/`"tdx"` entry, which the spec ignores.
+    w.map(if coco.is_some() { 3 } else { 2 });
     w.text("alg");
     w.int(-7);
     w.text("sig");
     w.bytes(&sig);
-    if let Some(r) = snp {
-        w.text("snp");
+    if let Some((key, r)) = coco {
+        w.text(key);
         w.bytes(&r);
     }
     Ok(w.into_vec())
