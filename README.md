@@ -124,8 +124,8 @@ Run `u2f-enclave --help` for the rest.
 | crate    | target            | purpose                                                            |
 | -------- | ----------------- | ------------------------------------------------------------------ |
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
-| `enclave`| `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `vmm` by `build.rs`. ~1.3 kLoC; see `enclave/DESIGN.md`. |
-| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process, and recomputes the launch measurement offline. ~1.2 kLoC. |
+| `enclave`| `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `vmm`. See [DESIGN.md](enclave/DESIGN.md). |
+| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest` subcommands. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `vmm` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
@@ -192,8 +192,7 @@ $ echo $?
 
 The VCEK is fetched from AMD's KDS once and cached under
 `$XDG_CACHE_HOME`; for air-gapped use, pass `--vcek FILE`. Runs on any
-x86_64 Linux box; same binary, no AMD hardware needed. Source:
-`vmm/src/verify.rs` (~190 LoC).
+x86_64 Linux box; same binary, no AMD hardware needed.
 
 **Why keys survive a restart:** the authenticator never stores its
 master secret. On every launch it asks the PSP to re-derive it from the
@@ -208,7 +207,7 @@ stop working. No sealed blobs, no host-side state, nothing to back up.
   stateless non-resident credentials. Verified against `libfido2` and
   OpenSSH `sk-ecdsa`.
 - **SEV-SNP** – encrypted+measured launch, paravirt GHCB, virtio over shared
-  rings, guest↔PSP messaging. ~145 KB text, 492 KB measured launch image.
+  rings, guest↔PSP messaging.
 - **Attestation** – report in `attStmt`, VCEK signature verified, measurement
   stable and offline-recomputable, master key persists.
 - **Next** – resident keys / `clientPIN`; TDX.
