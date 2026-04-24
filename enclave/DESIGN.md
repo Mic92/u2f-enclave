@@ -128,24 +128,23 @@ blob, no network. A different binary (or a tampered host that alters the
 launch image) derives a different key and old credentials simply do not
 resolve — the persistence and the binding are the same mechanism.
 
-## Predicted measurement
+## Computing the measurement offline
 
-The authoritative measurement is whatever the PSP signs into the report.
-`u2f-enclave --measure` *predicts* it from the embedded ELF
+`u2f-enclave --measure` recomputes the launch digest from the embedded ELF
 without an EPYC host: it lays out PT_LOADs, runs the SNP `PAGE_INFO`
 SHA-384 chain over those pages, the SECRETS page metadata, and a VMSA
 template. The template mirrors what KVM's `sev_es_sync_vmsa` produces for
 our PVH register state (verified against a `dynamic_debug` hex-dump on a
 6.18 kernel). The C-bit position travels in `%esi` and is therefore part
 of the measured state; it is hard-coded to 51 (every shipping SNP part)
-so the prediction is a pure function of the binary, and `Snp::init()`
-asserts the host agrees.
+so the result is a pure function of the binary, and `Snp::init()` asserts
+the host agrees.
 
-A wrong prediction fails closed: `verify` rejects genuine reports, but an
-attacker cannot make the PSP sign a digest of their choosing, so it never
-accepts a wrong one. `e2e::libfido2_vmm_snp` asserts predictor == PSP on
-real hardware on every run; if that fails, dump the ground-truth VMSA and
-diff against `measure::vmsa_page`:
+If the computation is wrong, `verify` rejects valid reports; it can't
+accept an invalid one because the PSP only signs what it actually
+measured. `e2e::libfido2_vmm_snp` checks the computation against a real
+chip on every run. When that fails, dump KVM's actual VMSA and diff
+against `measure::vmsa_page`:
 
 ```sh
 echo 'func sev_es_sync_vmsa +p' | sudo tee /sys/kernel/debug/dynamic_debug/control

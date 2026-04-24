@@ -152,15 +152,10 @@ that report:
    Distribution Service. Fetch it (or cache it) and verify the report's
    P-384 signature.
 3. **Running the code you audited?** The report's `measurement` (bytes
-   `0x90..0xc0`) must be on your allow-list. The PSP-signed value is the
-   authoritative one; `u2f-enclave --measure` *predicts* it from the
-   embedded guest image plus a model of KVM's launch-time register
-   state, so you can derive the allow-list in CI without AMD hardware.
-   The prediction is validated against real silicon by the test suite
-   and fails closed if wrong (genuine reports get rejected, never the
-   reverse). If you'd rather not trust the model, launch the audited
-   binary once on your own SNP host and pin the measurement the PSP
-   actually signs.
+   `0x90..0xc0`) must match the build you reviewed.
+   `u2f-enclave --measure` computes that value without AMD hardware; the
+   test suite checks it against a real chip. If the computation were ever
+   wrong you'd reject good reports, not accept bad ones.
 
 If all three pass, the new credential's private key exists only inside
 an encrypted VM running this exact binary on a genuine AMD chip. There

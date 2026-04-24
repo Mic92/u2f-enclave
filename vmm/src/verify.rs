@@ -166,10 +166,9 @@ pub fn cmd(vcek_path: Option<String>, expected_measurement: [u8; 48]) -> i32 {
             false
         }
     };
-    // The PSP-signed measurement is authoritative; we compare it against
-    // this binary's *prediction* of what the PSP would compute for its own
-    // guest image. A wrong prediction (KVM drift, bug) fails closed — the
-    // PSP won't sign a digest the attacker chose.
+    // Compare against what *this binary* computes for its own guest image.
+    // If the computation is wrong we reject good reports; we can't accept a
+    // bad one because the PSP only signs what it actually measured.
     let meas_ok = r.measurement() == expected_measurement;
     let pol_ok = r.policy() == crate::snp::SNP_POLICY;
 
@@ -178,9 +177,9 @@ pub fn cmd(vcek_path: Option<String>, expected_measurement: [u8; 48]) -> i32 {
         "measurement   {}  {}",
         hex(r.measurement()),
         if meas_ok {
-            "ok (matches this build's prediction)"
+            "ok (matches this build)"
         } else {
-            "FAIL (does not match this build)"
+            "FAIL"
         }
     );
     println!("policy        {:#x}  {}", r.policy(), ok(pol_ok));

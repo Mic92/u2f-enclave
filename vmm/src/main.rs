@@ -32,7 +32,7 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure              print this build's predicted SNP launch
+  u2f-enclave --measure              print this build's SNP launch
                                      measurement and exit
   u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
                                      check its VCEK signature and that its
@@ -330,7 +330,7 @@ fn print_measure() -> io::Result<()> {
     println!("{}", verify::hex(&ld));
     io::stdout().flush()?;
     eprintln!(
-        "↑ predicted SEV-SNP launch measurement for this build.\n  \
+        "↑ SEV-SNP launch measurement for this build.\n  \
          An attStmt[\"snp\"] report from `u2f-enclave --snp` carries this at\n  \
          bytes 0x90..0xc0; check it after verifying the VCEK signature.\n\
          inputs:\n  \
