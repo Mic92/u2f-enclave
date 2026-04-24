@@ -95,6 +95,19 @@ impl Snp {
     /// `KVM_SEV_INIT2` + `guest_memfd` + memslot. Must run before any vCPU
     /// is created.
     pub fn init(vm: &OwnedFd, mem: *mut u8, mem_size: u64) -> io::Result<Self> {
+        // KVM forwards the guest's MSR-protocol page-state-change as
+        // KVM_EXIT_HYPERCALL(MAP_GPA_RANGE) only if this cap is enabled;
+        // otherwise it returns an error to the guest and our GHCB never
+        // comes up.
+        ioctl_ref(
+            vm,
+            kvm::KVM_ENABLE_CAP,
+            &mut kvm::EnableCap {
+                cap: kvm::KVM_CAP_EXIT_HYPERCALL,
+                args: [1 << kvm::KVM_HC_MAP_GPA_RANGE, 0, 0, 0],
+                ..Default::default()
+            },
+        )?;
         let sev = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

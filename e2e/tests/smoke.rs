@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use e2e::*;
 
 /// SEV-SNP encrypted launch end-to-end: own VMM, no firmware. The guest
-/// reaches 64-bit Rust through the C-bit page tables and reports back via
-/// the GHCB MSR terminate request — no `#VC` handler needed yet.
+/// brings up a GHCB page (PVALIDATE + MSR-protocol PSC + GPA registration)
+/// and prints to serial via paravirt IOIO — no `#VC` handler at all.
 #[test]
 fn snp_boot() {
     let _g = serial_guard();
@@ -46,9 +46,12 @@ fn snp_boot() {
         .unwrap()
         .read_to_string(&mut stderr)
         .ok();
-    // 0x77 = sev::TERM_BOOT_OK from the guest.
+    // 0x77 = sev::TERM_BOOT_OK; the banner is printed *from inside encrypted
+    // memory* via GHCB IOIO and surfaces as plain KVM_EXIT_IO in the vmm.
     assert!(
-        st.code() == Some(0x77) && stderr.contains("SEV-SNP launch ok"),
+        st.code() == Some(0x77)
+            && stderr.contains("SEV-SNP launch ok")
+            && stderr.contains("u2f-enclave: SEV-SNP active, GHCB up"),
         "status={st:?}\nstderr: {stderr}"
     );
 }

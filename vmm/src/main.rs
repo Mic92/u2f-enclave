@@ -170,6 +170,27 @@ fn main() -> io::Result<()> {
                     m.data = [0xff; 8];
                 }
             }
+            // SNP guest's page-state-change: flip KVM's private/shared
+            // attribute for the range; KVM does the RMPUPDATE and writes
+            // the GHCB-MSR response on resume.
+            kvm::EXIT_HYPERCALL => {
+                let hc = unsafe { &mut hdr.u.hypercall };
+                if hc.nr == kvm::KVM_HC_MAP_GPA_RANGE {
+                    let private = hc.args[2] & (1 << 4) != 0;
+                    let mut attrs = kvm::MemAttrs {
+                        address: hc.args[0],
+                        size: hc.args[1] << 12,
+                        attributes: if private {
+                            kvm::KVM_MEMORY_ATTRIBUTE_PRIVATE
+                        } else {
+                            0
+                        },
+                        flags: 0,
+                    };
+                    kvm::ioctl_ref(&vm, kvm::KVM_SET_MEMORY_ATTRIBUTES, &mut attrs)?;
+                    hc.ret = 0;
+                }
+            }
             kvm::EXIT_SYSTEM_EVENT => {
                 let ev = unsafe { hdr.u.system_event };
                 if ev.type_ == kvm::SYSTEM_EVENT_SEV_TERM {

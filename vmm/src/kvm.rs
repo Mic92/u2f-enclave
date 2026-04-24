@@ -36,6 +36,7 @@ pub const KVM_SET_REGS: libc::c_ulong = iow::<Regs>(0x82);
 pub const KVM_GET_SREGS: libc::c_ulong = ior::<Sregs>(0x83);
 pub const KVM_SET_SREGS: libc::c_ulong = iow::<Sregs>(0x84);
 pub const KVM_SET_CPUID2: libc::c_ulong = iow::<Cpuid2Hdr>(0x90);
+pub const KVM_ENABLE_CAP: libc::c_ulong = iow::<EnableCap>(0xa3);
 pub const KVM_MEMORY_ENCRYPT_OP: libc::c_ulong = iowr::<u64>(0xba);
 pub const KVM_SET_MEMORY_ATTRIBUTES: libc::c_ulong = iow::<MemAttrs>(0xd2);
 pub const KVM_CREATE_GUEST_MEMFD: libc::c_ulong = iowr::<CreateGuestMemfd>(0xd4);
@@ -43,8 +44,11 @@ pub const KVM_CREATE_GUEST_MEMFD: libc::c_ulong = iowr::<CreateGuestMemfd>(0xd4)
 pub const KVM_X86_SNP_VM: libc::c_ulong = 4;
 pub const KVM_MEM_GUEST_MEMFD: u32 = 1 << 2;
 pub const KVM_MEMORY_ATTRIBUTE_PRIVATE: u64 = 1 << 3;
+pub const KVM_CAP_EXIT_HYPERCALL: u32 = 201;
+pub const KVM_HC_MAP_GPA_RANGE: u64 = 12;
 
 pub const EXIT_IO: u32 = 2;
+pub const EXIT_HYPERCALL: u32 = 3;
 pub const EXIT_HLT: u32 = 5;
 pub const EXIT_MMIO: u32 = 6;
 pub const EXIT_SHUTDOWN: u32 = 8;
@@ -93,6 +97,15 @@ pub struct CreateGuestMemfd {
     pub size: u64,
     pub flags: u64,
     pub reserved: [u64; 6],
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct EnableCap {
+    pub cap: u32,
+    pub flags: u32,
+    pub args: [u64; 4],
+    pub pad: [u64; 8],
 }
 
 #[repr(C)]
@@ -186,8 +199,17 @@ pub struct RunHdr {
 #[repr(C)]
 pub union RunUnion {
     pub io: RunIo,
+    pub hypercall: RunHypercall,
     pub mmio: RunMmio,
     pub system_event: RunSysEvent,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RunHypercall {
+    pub nr: u64,
+    pub args: [u64; 6],
+    pub ret: u64,
+    pub flags: u64,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]

@@ -11,7 +11,6 @@
 
 extern crate alloc;
 
-use core::arch::asm;
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 use linked_list_allocator::LockedHeap;
@@ -37,12 +36,9 @@ static ALLOC: LockedHeap = LockedHeap::empty();
 #[no_mangle]
 pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     if c_bit != 0 {
-        // Reaching here under SEV-ES with the C-bit applied means the
-        // encrypted launch + page-table setup worked. There is no `#VC`
-        // handler yet, so any IOIO/MMIO would triple-fault; bow out via the
-        // GHCB MSR protocol with a marker the vmm/e2e can check.
-        let _ = sev::status(); // sanity: non-interceptable; #GP if vmm lied
-        sev::terminate(sev::TERM_BOOT_OK);
+        // Brings up the GHCB so port I/O works; everything below is then
+        // identical for plain and encrypted boots.
+        sev::init(c_bit);
     }
 
     // SAFETY: single-threaded, runs once before any allocation.
@@ -51,6 +47,12 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     }
     serial::init();
     serial::print("u2f-enclave: boot\n");
+    if sev::active() {
+        serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
+        // No vsock yet under SNP (rings need shared pages, MMIO needs GHCB);
+        // the serial line above is the e2e step-2 proof.
+        sev::terminate(sev::TERM_BOOT_OK);
+    }
 
     let Some(vs) = vsock::init(VSOCK_PORT) else {
         serial::print("u2f-enclave: no vsock, halt\n");
@@ -76,9 +78,9 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
 /// process exit code of `(code << 1) | 1`. Falls back to `hlt` if nobody is
 /// listening.
 fn debug_exit(code: u32) -> ! {
-    unsafe { asm!("out dx, eax", in("dx") 0xf4u16, in("eax") code) };
+    sev::outl(0xf4, code);
     loop {
-        unsafe { asm!("hlt", options(nomem, nostack)) };
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }
 }
 

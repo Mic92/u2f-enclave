@@ -69,9 +69,9 @@ static GDT64_PTR: GdtPtr = GdtPtr {
 // --- page tables ----------------------------------------------------------
 
 #[repr(C, align(4096))]
-struct PageTable([u64; 512]);
+pub struct PageTable(pub [u64; 512]);
 
 #[no_mangle]
-static mut PML4: PageTable = PageTable([0; 512]);
+pub static mut PML4: PageTable = PageTable([0; 512]);
 #[no_mangle]
-static mut PDPT: PageTable = PageTable([0; 512]);
+pub static mut PDPT: PageTable = PageTable([0; 512]);
