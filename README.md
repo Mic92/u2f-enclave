@@ -33,10 +33,10 @@ minimal TCB rather than a fork of an existing SVSM.
 
 ## Status / milestones
 
-- **M0 (this scaffold)** – CTAPHID transport, `CTAPHID_INIT`/`PING`/`WINK`,
-  CTAP2 `getInfo`. Works end-to-end against `libfido2` via `sim` + `bridge`.
-- **M1** – `makeCredential` / `getAssertion` (ES256 via RustCrypto `p256`),
-  non-resident credentials, `fmt:"none"` attestation.
+- **M0** – CTAPHID transport, `CTAPHID_INIT`/`PING`/`WINK`, CTAP2 `getInfo`.
+- **M1 (current)** – `makeCredential` / `getAssertion` (ES256 via RustCrypto
+  `p256`), stateless non-resident credentials, `fmt:"none"` attestation.
+  Register + sign verified end-to-end in unit tests.
 - **M2** – SEV-SNP unikernel target, virtio-vsock, embed SNP attestation
   report in a custom `fmt:"sev-snp"` attestation statement.
 - **M3** – resident keys, `clientPIN`, TDX.

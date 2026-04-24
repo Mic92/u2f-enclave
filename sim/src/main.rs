@@ -18,10 +18,15 @@ fn default_socket() -> PathBuf {
     dir.join("u2f-enclave.sock")
 }
 
-struct OsRandom;
-impl Platform for OsRandom {
+struct Host {
+    master: [u8; 32],
+}
+impl Platform for Host {
     fn random_bytes(&mut self, buf: &mut [u8]) {
         getrandom::getrandom(buf).expect("getrandom");
+    }
+    fn master_secret(&self) -> [u8; 32] {
+        self.master
     }
 }
 
@@ -34,10 +39,16 @@ fn main() -> std::io::Result<()> {
     let listener = UnixListener::bind(&path)?;
     eprintln!("sim: listening on {}", path.display());
 
+    // Ephemeral per-process secret: registrations only survive as long as the
+    // simulator does, which is exactly the isolation guarantee we want for a
+    // host-side stand-in. The real enclave provisions this via attestation.
+    let mut master = [0u8; 32];
+    getrandom::getrandom(&mut master).expect("getrandom");
+
     for stream in listener.incoming() {
         let mut stream = stream?;
         eprintln!("sim: client connected");
-        let mut auth = Authenticator::new(OsRandom, AAGUID);
+        let mut auth = Authenticator::new(Host { master }, AAGUID);
         let mut buf: Report = [0u8; HID_REPORT_SIZE];
         // One client at a time; a disconnect must not tear down the listener.
         'client: loop {

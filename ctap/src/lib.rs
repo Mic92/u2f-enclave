@@ -11,6 +11,7 @@ extern crate alloc;
 
 pub mod authenticator;
 pub mod cbor;
+pub mod cred;
 pub mod ctap2;
 pub mod hid;
 

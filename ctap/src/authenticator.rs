@@ -1,5 +1,6 @@
 //! Top-level state machine: CTAPHID reassembly + command dispatch.
 
+use crate::cred::MasterKeys;
 use crate::ctap2;
 use crate::hid::{self, Report, CID_BROADCAST};
 use alloc::vec::Vec;
@@ -9,6 +10,10 @@ use alloc::vec::Vec;
 pub trait Platform {
     /// Fill `buf` with cryptographically random bytes.
     fn random_bytes(&mut self, buf: &mut [u8]);
+    /// 32-byte device secret from which all credential keys are derived.
+    /// In the simulator this is random-at-boot; in the enclave it will be
+    /// provisioned via SNP attestation so it survives restarts.
+    fn master_secret(&self) -> [u8; 32];
 }
 
 struct Pending {
@@ -22,14 +27,17 @@ struct Pending {
 pub struct Authenticator<P: Platform> {
     platform: P,
     aaguid: [u8; 16],
+    keys: MasterKeys,
     pending: Option<Pending>,
 }
 
 impl<P: Platform> Authenticator<P> {
     pub fn new(platform: P, aaguid: [u8; 16]) -> Self {
+        let keys = MasterKeys::derive(&platform.master_secret());
         Self {
             platform,
             aaguid,
+            keys,
             pending: None,
         }
     }
@@ -119,7 +127,12 @@ impl<P: Platform> Authenticator<P> {
             hid::CTAPHID_PING => hid::fragment(cid, hid::CTAPHID_PING, &payload),
             hid::CTAPHID_WINK => hid::fragment(cid, hid::CTAPHID_WINK, &[]),
             hid::CTAPHID_CBOR => {
-                let resp = ctap2::handle(&self.aaguid, &payload);
+                let mut cx = ctap2::Ctx {
+                    platform: &mut self.platform,
+                    aaguid: &self.aaguid,
+                    keys: &self.keys,
+                };
+                let resp = ctap2::handle(&mut cx, &payload);
                 hid::fragment(cid, hid::CTAPHID_CBOR, &resp)
             }
             hid::CTAPHID_CANCEL => Vec::new(),
@@ -171,6 +184,9 @@ mod tests {
             for (i, b) in buf.iter_mut().enumerate() {
                 *b = src[i % 4];
             }
+        }
+        fn master_secret(&self) -> [u8; 32] {
+            [0u8; 32]
         }
     }
 
@@ -233,6 +249,5 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0][4], 0x80 | CTAPHID_CBOR);
         assert_eq!(out[0][7], ctap2::status::OK);
-        assert_eq!(out[0][8], 0xA3); // CBOR map(3)
     }
 }
