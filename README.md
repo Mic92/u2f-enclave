@@ -39,9 +39,11 @@ minimal TCB rather than a fork of an existing SVSM.
   Verified against two independent stacks: Yubico `libfido2`
   (`scripts/smoke-libfido2.sh`) and OpenSSH `sk-ecdsa` keygen+login
   (`scripts/smoke-ssh.sh`).
-- **M2 (in progress)** – bare-metal unikernel. Stage 1 done: PVH boot, the
-  full authenticator runs in a 25 KB `x86_64-unknown-none` ELF under plain
-  QEMU (`scripts/boot-enclave.sh`). Next: virtio-vsock, then SEV-SNP.
+- **M2 (in progress)** – bare-metal unikernel. PVH boot + hand-rolled
+  virtio-mmio/vsock done: `scripts/smoke-kernel.sh` runs the full `libfido2`
+  register/assert sequence against a ~100 KB `x86_64-unknown-none` ELF over
+  `vhost-vsock`. Remaining: SEV-SNP `#VC`/GHCB + attestation report
+  (needs an EPYC host).
 - **M2** – SEV-SNP unikernel target, virtio-vsock, embed SNP attestation
   report in a custom `fmt:"sev-snp"` attestation statement.
 - **M3** – resident keys, `clientPIN`, TDX.

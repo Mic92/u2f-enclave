@@ -31,22 +31,19 @@ hundred lines, not the full SVSM protocol layer.
 Boot artefact becomes an IGVM file so the launch measurement is deterministic
 and matches what the relying party pins.
 
-## Stage 3 — virtio-vsock
+## Stage 3 — virtio-vsock — **done**
 
-- Transport: virtio-mmio (single device, no PCI enumeration). The
-  `coconut-svsm/virtio-drivers/` crate already abstracts ring handling for a
-  `no_std` environment; depend on it directly.
-- Socket layer: implement `connect`-less listen on a fixed port, one stream,
-  `read_exact(64)`/`write_all(64)`. ~200 LoC on top of the ring driver.
-- `kmain()` becomes the obvious loop:
-  ```rust
-  let mut sock = vsock::accept(PORT);
-  loop {
-      sock.read_exact(&mut report)?;
-      for r in auth.process_report(&report) { sock.write_all(&r)?; }
-  }
-  ```
-  This is byte-identical to `sim`, so `bridge` needs no changes.
+Hand-rolled (no `virtio-drivers` dep): modern virtio-mmio transport + split
+virtqueue + single-connection vsock STREAM, polling, ~450 LoC total.
+`scripts/smoke-kernel.sh` boots under `qemu -M microvm` with
+`vhost-vsock-device`, `bridge` connects over AF_VSOCK, and the full
+`libfido2` register/attest/assert/verify sequence passes against the
+bare-metal kernel.
+
+QEMU specifics that bit: `-global virtio-mmio.force-legacy=false` (default
+is the v1 register layout), `-bios qboot.rom` (microvm's SeaBIOS doesn't do
+PVH), `ioapic2=off` to cap transports at 8, and the device lands in the
+*last* MMIO slot due to QOM bus assignment order — so we scan.
 
 ## Stage 4 — attestation in attStmt
 

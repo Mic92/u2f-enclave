@@ -1,6 +1,7 @@
 /* 32-bit PVH entry → long mode. Runs with paging off, flat 4 GiB segments,
- * %ebx = hvm_start_info (ignored for now). Maps [0, 2 MiB) with one huge
- * page, enables PAE+LME+PG, loads a 64-bit GDT and far-jumps into Rust.
+ * %ebx = hvm_start_info (ignored for now). Identity-maps [0, 4 GiB) with four
+ * 1 GiB pages so virtio-mmio at 0xfeb00000 is reachable, enables PAE+LME+PG,
+ * loads a 64-bit GDT and far-jumps into Rust.
  *
  * Derived from cloud-hypervisor/rust-hypervisor-firmware (Apache-2.0). */
 
@@ -11,9 +12,11 @@
 ram32_start:
     cli
 
-    /* PD[0] = 2 MiB identity page; PDPT[0] -> PD; PML4[0] -> PDPT */
-    movl $0b10000011, (PD)
-    movl $PD,   %eax; orb $0b11, %al; movl %eax, (PDPT)
+    /* PDPT[0..4] = 1 GiB identity pages; PML4[0] -> PDPT */
+    movl $0x00000083, (PDPT)      /* P|RW|PS */
+    movl $0x40000083, (PDPT+8)
+    movl $0x80000083, (PDPT+16)
+    movl $0xC0000083, (PDPT+24)
     movl $PDPT, %eax; orb $0b11, %al; movl %eax, (PML4)
 
     movl $PML4, %eax

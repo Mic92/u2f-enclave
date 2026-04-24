@@ -7,11 +7,11 @@ cd "$(dirname "$0")/.."
 cargo build -p enclave --target x86_64-unknown-none --release
 ELF=target/x86_64-unknown-none/release/enclave
 
+rc=0
 out=$(timeout 10 qemu-system-x86_64 \
 	-kernel "$ELF" \
 	-cpu max -m 8M -nographic -no-reboot \
-	-device isa-debug-exit,iobase=0xf4,iosize=0x04 2>&1)
-rc=$?
+	-device isa-debug-exit,iobase=0xf4,iosize=0x04 2>&1) || rc=$?
 
 printf '%s\n' "$out"
 grep -q 'ctap link ok' <<<"$out"

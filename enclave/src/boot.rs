@@ -75,5 +75,3 @@ struct PageTable([u64; 512]);
 static mut PML4: PageTable = PageTable([0; 512]);
 #[no_mangle]
 static mut PDPT: PageTable = PageTable([0; 512]);
-#[no_mangle]
-static mut PD: PageTable = PageTable([0; 512]);

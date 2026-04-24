@@ -1,9 +1,8 @@
 //! Bare-metal authenticator kernel.
 //!
-//! At this stage the goal is only to prove the full `ctap` stack (sha2, hmac,
-//! p256, ecdsa) links and runs without `std` on `x86_64-unknown-none`. Boot
-//! glue (PVH/IGVM entry, page tables, GHCB, virtio-vsock) is layered on top
-//! of this in subsequent commits — see `DESIGN.md` for the lift map.
+//! PVH-boots, brings up a polling virtio-vsock, and serves CTAP HID reports
+//! over it. SEV-SNP (#VC, GHCB, attestation) is layered on top — see
+//! `DESIGN.md`.
 //!
 //! Build: `cargo build -p enclave --target x86_64-unknown-none --release`
 
@@ -20,6 +19,10 @@ use linked_list_allocator::LockedHeap;
 mod boot;
 mod platform;
 mod serial;
+mod virtio;
+mod vsock;
+
+const VSOCK_PORT: u32 = 5555;
 
 const HEAP_SIZE: usize = 256 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
@@ -28,7 +31,7 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static ALLOC: LockedHeap = LockedHeap::empty();
 
 /// 64-bit entry, far-jumped to from `ram32.s` with a valid stack and
-/// [0, 2 MiB) identity-mapped.
+/// [0, 4 GiB) identity-mapped.
 #[no_mangle]
 pub extern "C" fn rust64_start() -> ! {
     // SAFETY: single-threaded, runs once before any allocation.
@@ -38,25 +41,30 @@ pub extern "C" fn rust64_start() -> ! {
     serial::init();
     serial::print("u2f-enclave: boot\n");
 
-    kmain();
-
-    serial::print("u2f-enclave: halt\n");
-    qemu_exit(0);
-}
-
-fn kmain() {
     let mut auth = ctap::Authenticator::new(platform::BareMetal::new(), ctap::AAGUID);
 
-    // Smoke: feed one all-zero report (invalid CID) and confirm we get an
-    // error packet back. Exercises CTAPHID, alloc, and the panic-free path
-    // before any transport exists.
-    let out = auth.process_report(&[0u8; ctap::HID_REPORT_SIZE]);
-    serial::print("u2f-enclave: ctap link ok, resp pkts=");
-    serial::print_u32(out.len() as u32);
+    let Some(vs) = vsock::init(VSOCK_PORT) else {
+        // No virtio-vsock (e.g. plain `pc` machine in CI) — keep the link
+        // smoke so `boot-enclave.sh` still has something to assert on.
+        let out = auth.process_report(&[0u8; ctap::HID_REPORT_SIZE]);
+        serial::print("u2f-enclave: ctap link ok, resp pkts=");
+        serial::print_u32(out.len() as u32);
+        serial::print("\nu2f-enclave: no vsock, halt\n");
+        qemu_exit(0);
+    };
+    serial::print("u2f-enclave: vsock cid=");
+    serial::print_u32(vsock::guest_cid(vs) as u32);
+    serial::print(" port=");
+    serial::print_u32(VSOCK_PORT);
     serial::print("\n");
 
-    // TODO(M2): bring up virtio-vsock, accept(), then loop:
-    //   read 64B -> auth.process_report -> write all 64B replies
+    let mut report = [0u8; ctap::HID_REPORT_SIZE];
+    loop {
+        vs.read_report(&mut report);
+        for r in auth.process_report(&report) {
+            vs.write_report(&r);
+        }
+    }
 }
 
 /// Exit QEMU via `isa-debug-exit`; falls back to `hlt` on real hardware.
