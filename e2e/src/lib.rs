@@ -11,8 +11,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
-pub const VSOCK_CID: u32 = 42;
-pub const VSOCK_PORT: u32 = 5555;
+const VSOCK_CID: u32 = 42;
+const VSOCK_PORT: u32 = 5555;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -22,7 +22,7 @@ pub fn serial_guard() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn workspace_root() -> PathBuf {
+fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -75,9 +75,6 @@ impl Tmp {
         let p = PathBuf::from(base).join(format!("u2fe-e2e-{tag}"));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
-        let mut perm = fs::metadata(&p).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o700);
-        fs::set_permissions(&p, perm).unwrap();
         Self(p)
     }
     pub fn path(&self) -> &Path {
@@ -132,7 +129,7 @@ pub fn which(bin: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{bin} not in PATH"))
 }
 
-pub fn qboot_rom() -> PathBuf {
+fn qboot_rom() -> PathBuf {
     let qemu = fs::canonicalize(which("qemu-system-x86_64")).unwrap();
     qemu.parent()
         .and_then(|p| p.parent())
@@ -164,17 +161,25 @@ fn find_hidraw() -> PathBuf {
     }
 }
 
-/// RAII handle over the authenticator backend (sim or qemu) plus the bridge.
-/// Children are SIGKILLed on drop so a panicking test does not leak them.
-pub struct Backend {
-    children: Vec<Child>,
-    pub hidraw: PathBuf,
-    _tmp: Tmp,
+/// Kill-on-drop child set. Constructors push as they spawn so a panic during
+/// bring-up (e.g. `find_hidraw` timing out) does not leak qemu holding the
+/// vsock CID.
+#[derive(Default)]
+pub struct Procs(Vec<Child>);
+impl Procs {
+    pub fn spawn(&mut self, cmd: &mut Command) {
+        self.0.push(
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}")),
+        );
+    }
 }
-
-impl Drop for Backend {
+impl Drop for Procs {
     fn drop(&mut self) {
-        for c in self.children.iter_mut().rev() {
+        for c in self.0.iter_mut().rev() {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -183,31 +188,30 @@ impl Drop for Backend {
     }
 }
 
-fn spawn_quiet(cmd: &mut Command) -> Child {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}"))
+pub struct Backend {
+    pub procs: Procs,
+    pub hidraw: PathBuf,
+    _tmp: Tmp,
 }
 
 pub fn sim_backend() -> Backend {
     let tmp = Tmp::new("sim");
     let sock = tmp.join("ctap.sock");
-    let sim = spawn_quiet(Command::new(host_bin("sim")).arg(&sock));
+    let mut procs = Procs::default();
+    procs.spawn(Command::new(host_bin("sim")).arg(&sock));
     std::thread::sleep(Duration::from_millis(200));
-    let bridge = spawn_quiet(Command::new(host_bin("bridge")).arg(&sock));
+    procs.spawn(Command::new(host_bin("bridge")).arg(&sock));
     Backend {
         hidraw: find_hidraw(),
-        children: vec![sim, bridge],
+        procs,
         _tmp: tmp,
     }
 }
 
 pub fn kernel_backend() -> Backend {
     let tmp = Tmp::new("kern");
-    let elf = enclave_elf();
-    let qemu = spawn_quiet(
+    let mut procs = Procs::default();
+    procs.spawn(
         Command::new("qemu-system-x86_64")
             .args(["-M", "microvm,pic=off,pit=off,rtc=off,ioapic2=off"])
             .args(["-cpu", "max", "-m", "8M", "-nographic", "-no-reboot"])
@@ -219,15 +223,13 @@ pub fn kernel_backend() -> Backend {
                 &format!("vhost-vsock-device,guest-cid={VSOCK_CID}"),
             ])
             .arg("-kernel")
-            .arg(&elf),
+            .arg(enclave_elf()),
     );
     std::thread::sleep(Duration::from_millis(500));
-    let bridge = spawn_quiet(
-        Command::new(host_bin("bridge")).arg(format!("vsock:{VSOCK_CID}:{VSOCK_PORT}")),
-    );
+    procs.spawn(Command::new(host_bin("bridge")).arg(format!("vsock:{VSOCK_CID}:{VSOCK_PORT}")));
     Backend {
         hidraw: find_hidraw(),
-        children: vec![qemu, bridge],
+        procs,
         _tmp: tmp,
     }
 }

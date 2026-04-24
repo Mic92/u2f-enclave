@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use e2e::*;
 
@@ -53,7 +53,7 @@ fn ssh_sim() {
     if !need_writable("/dev/uhid") {
         return;
     }
-    let be = sim_backend();
+    let mut be = sim_backend();
     let tmp = Tmp::new("ssh");
     let port = "58022";
 
@@ -76,55 +76,35 @@ fn ssh_sim() {
     fs::write(
         tmp.join("sshd_config"),
         format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {hk}\nPidFile {pid}\n\
-             AuthorizedKeysFile {ak}\nPubkeyAuthentication yes\n\
-             PasswordAuthentication no\nKbdInteractiveAuthentication no\n\
-             UsePAM no\nStrictModes no\n",
-            hk = tmp.join("hostkey").display(),
-            pid = tmp.join("sshd.pid").display(),
-            ak = tmp.join("authorized_keys").display(),
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\n\
+             PidFile {d}/sshd.pid\nAuthorizedKeysFile {d}/authorized_keys\n\
+             PubkeyAuthentication yes\nPasswordAuthentication no\n\
+             KbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n",
+            d = tmp.path().display(),
         ),
     )
     .unwrap();
 
-    // sshd refuses to run from a relative path.
-    let mut sshd = Command::new(which("sshd"))
-        .args(["-D", "-e", "-f"])
-        .arg(tmp.join("sshd_config"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn sshd");
+    // sshd refuses to run from a relative path; reap via the backend so a
+    // failing ssh-login panic does not leak it.
+    be.procs.spawn(
+        Command::new(which("sshd"))
+            .args(["-D", "-f"])
+            .arg(tmp.join("sshd_config")),
+    );
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let user = std::env::var("USER").unwrap();
-    let res = Command::new("ssh")
+    run(Command::new("ssh")
         .args(["-p", port, "-i"])
         .arg(tmp.join("id"))
+        .args(["-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"])
         .args([
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "IdentityAgent=none",
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
         ])
         .arg(format!("{user}@127.0.0.1"))
-        .arg("true")
-        .output()
-        .expect("spawn ssh");
-
-    let _ = sshd.kill();
-    let sshd_out = sshd.wait_with_output().unwrap();
-    drop(be);
-
-    assert!(
-        res.status.success(),
-        "ssh login failed: {}\nsshd: {}",
-        String::from_utf8_lossy(&res.stderr),
-        String::from_utf8_lossy(&sshd_out.stderr),
-    );
+        .arg("true"));
 }
