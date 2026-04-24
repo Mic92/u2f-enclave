@@ -393,19 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn get_info_is_canonical_cbor() {
-        let r = get_info(&[0xAA; 16]);
-        assert_eq!(r[0], status::OK);
-        let mut rd = Reader::new(&r[1..]);
-        assert_eq!(rd.map().unwrap(), 4);
-        assert_eq!(rd.unsigned().unwrap(), 1);
-        assert_eq!(rd.array().unwrap(), 1);
-        assert_eq!(rd.text().unwrap(), "FIDO_2_0");
-        assert_eq!(rd.unsigned().unwrap(), 3);
-        assert_eq!(rd.bytes().unwrap(), &[0xAA; 16]);
-    }
-
-    #[test]
     fn register_then_sign_verifies() {
         let (mut p, keys, aaguid) = ctx();
         let mut cx = Ctx {

@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn cbor_get_info() {
+    fn cbor_routes_to_ctap2() {
         let mut a = auth();
         let out = feed(&mut a, fragment(0x42, CTAPHID_CBOR, &[ctap2::CMD_GET_INFO]));
         assert_eq!(out.len(), 1);
