@@ -39,39 +39,39 @@ fn libfido2_vmm_snp() {
 
     let cdh = [0x11u8; 32];
     let (ad, rep) = snp::make_credential(&be.hidraw, &cdh, "example.org");
-    let rep = snp::Report(&rep);
-    snp::check_binding(&ad, &cdh, &rep);
-    eprintln!(
-        "snp: v{} measurement={} chip_id={} tcb={:#x}",
-        rep.version(),
-        snp::hex(rep.measurement()),
-        snp::hex(&rep.chip_id()[..8]),
-        rep.reported_tcb(),
-    );
 
-    let m1 = rep.measurement().to_vec();
-    if let Some(vcek) = snp::fetch_vcek(&rep, std::path::Path::new("target/vcek-cache")) {
-        snp::verify_signature(&rep, &vcek);
-        eprintln!("snp: VCEK signature ok");
-    }
-
-    // Offline predictor: if this disagrees, KVM changed how it builds the
-    // VMSA (or we changed setup_pvh_cpu) and measure.rs needs updating.
-    let pred = run(Command::new(host_bin("u2f-enclave")).arg("--measure"));
-    assert_eq!(
-        String::from_utf8(pred.stdout).unwrap().trim(),
-        snp::hex(&m1),
-        "offline measurement predictor disagrees with PSP"
+    // The relying-party check is `u2f-enclave verify` itself: VCEK signature,
+    // and predictor==PSP for the measurement (a KVM VMSA change shows up as
+    // exit 1 here, not silent drift). It prints report_data; we do the
+    // binding check it leaves to the caller.
+    let out = pipe(
+        Command::new(host_bin("u2f-enclave"))
+            .arg("verify")
+            .stderr(std::process::Stdio::inherit()),
+        &rep,
     );
-    eprintln!("snp: offline measurement matches");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    eprint!("{stdout}");
+    assert!(out.status.success(), "u2f-enclave verify failed");
+
+    let mut h = sha2::Sha512::default();
+    use sha2::Digest;
+    h.update(&ad);
+    h.update(cdh);
+    let want_rd: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        stdout.contains(&want_rd),
+        "report_data does not bind authData||cdh"
+    );
 
     // Second launch: launch-1's credId still resolves, i.e. the
     // PSP-derived master key is in fact stable.
+    let m1 = rep[0x90..0xc0].to_vec();
     drop(be);
     let be = vmm_backend(true);
     let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");
     assert_eq!(
-        snp::Report(&rep2).measurement(),
+        &rep2[0x90..0xc0],
         m1,
         "measurement not stable across launches"
     );

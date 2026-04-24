@@ -1,52 +1,15 @@
-//! SNP attestation verifier (relying-party side, host code, not in TCB).
-//!
-//! Talks raw CTAPHID over `/dev/hidrawN` so we can read the `"snp"` attStmt
-//! key that stock libfido2 ignores; reuses the same CBOR codec the enclave
-//! uses.
+//! Raw CTAPHID-over-hidraw driver so the test can read `attStmt["snp"]`,
+//! which stock libfido2 ignores. Verifying the report is `u2f-enclave
+//! verify`'s job; this module only produces it.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
 use ctap::cbor::Reader;
 use ctap::hid;
-use p384::ecdsa::signature::hazmat::PrehashVerifier;
-use p384::ecdsa::{Signature, VerifyingKey};
-use sha2::{Digest, Sha384, Sha512};
 
-/// SNP `ATTESTATION_REPORT` structure (firmware ABI §7.3, Table 22).
-/// 1184 bytes; signature covers `[0..0x2a0]`.
-pub struct Report<'a>(pub &'a [u8]);
-impl<'a> Report<'a> {
-    pub const LEN: usize = 1184;
-    pub fn version(&self) -> u32 {
-        u32::from_le_bytes(self.0[..4].try_into().unwrap())
-    }
-    pub fn report_data(&self) -> &[u8] {
-        &self.0[0x50..0x90]
-    }
-    pub fn measurement(&self) -> &[u8] {
-        &self.0[0x90..0xc0]
-    }
-    pub fn reported_tcb(&self) -> u64 {
-        u64::from_le_bytes(self.0[0x180..0x188].try_into().unwrap())
-    }
-    pub fn chip_id(&self) -> &[u8] {
-        &self.0[0x1a0..0x1e0]
-    }
-    pub fn signed(&self) -> &[u8] {
-        &self.0[..0x2a0]
-    }
-    /// `r||s` big-endian. On-wire format is 72-byte LE-padded per component.
-    pub fn sig_be(&self) -> [u8; 96] {
-        let mut rs = [0u8; 96];
-        for (h, w) in [(0, 0x2a0), (48, 0x2a0 + 72)] {
-            rs[h..h + 48].copy_from_slice(&self.0[w..w + 48]);
-            rs[h..h + 48].reverse();
-        }
-        rs
-    }
-}
+pub const REPORT_LEN: usize = 1184;
 
 /// Minimal CTAPHID client over Linux hidraw: write 65 (leading report-id 0),
 /// read 64.
@@ -138,7 +101,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
             _ => rd.skip().unwrap(),
         }
     }
-    assert_eq!(snp.len(), Report::LEN, "no/short snp report in attStmt");
+    assert_eq!(snp.len(), REPORT_LEN, "no/short snp report in attStmt");
     (auth_data, snp)
 }
 
@@ -168,104 +131,4 @@ pub fn get_assertion(dev: &Path, cdh: &[u8; 32], rp: &str, cred_id: &[u8]) -> u8
 pub fn cred_id(auth_data: &[u8]) -> &[u8] {
     let n = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
     &auth_data[55..55 + n]
-}
-
-/// Relying-party check: the report's `report_data` is the SHA-512 of the
-/// exact bytes the credential signature covers, so a valid report binds the
-/// PSP-measured guest to this credential's public key.
-pub fn check_binding(auth_data: &[u8], cdh: &[u8; 32], report: &Report<'_>) {
-    let mut h = Sha512::new();
-    h.update(auth_data);
-    h.update(cdh);
-    assert_eq!(
-        report.report_data(),
-        &h.finalize()[..],
-        "report_data does not bind authData||cdh"
-    );
-    assert_ne!(report.measurement(), [0u8; 48], "zero measurement");
-}
-
-/// Verify the report's ECDSA P-384 signature against the VCEK leaf cert.
-/// Proves the report was produced by a genuine AMD PSP at the stated TCB.
-/// (ASK/ARK chain check would additionally prove the VCEK is AMD-issued; the
-/// KDS fetch already pins to AMD's endpoint, so for the test this is enough.)
-pub fn verify_signature(report: &Report<'_>, vcek_der: &[u8]) {
-    let sig = Signature::from_slice(&report.sig_be()).expect("sig parse");
-    // ABI §7.3: signature is over SHA-384(report[0..0x2a0]).
-    vcek_pubkey(vcek_der)
-        .verify_prehash(&Sha384::digest(report.signed()), &sig)
-        .expect("VCEK signature on SNP report does not verify");
-}
-
-/// AMD KDS lookup by `(chip_id, reported_tcb)`, cached on disk so the test
-/// is not network-bound after the first run. Returns `None` if neither cache
-/// nor network is available so the test can soft-skip.
-pub fn fetch_vcek(report: &Report<'_>, cache_dir: &Path) -> Option<Vec<u8>> {
-    let _ = fs::create_dir_all(cache_dir);
-    let tcb = report.reported_tcb().to_le_bytes();
-    let cache = cache_dir.join(format!(
-        "vcek-{}-{:016x}.der",
-        hex(&report.chip_id()[..8]),
-        report.reported_tcb()
-    ));
-    if let Ok(b) = fs::read(&cache) {
-        return Some(b);
-    }
-    // KDS product name from report v3+'s cpuid (family, model). Mapping per
-    // virtee/sev (Apache-2.0). v2 reports lack the field; caller sets env.
-    let (fam, mdl) = (report.0[0x188], report.0[0x189]);
-    let product = if report.version() < 3 {
-        std::env::var("U2FE_KDS_PRODUCT").ok()?
-    } else {
-        match (fam, mdl) {
-            (0x19, 0x00..=0x0f) => "Milan",
-            (0x19, 0x10..=0x1f) | (0x19, 0xa0..=0xaf) => "Genoa",
-            (0x1a, 0x00..=0x11) => "Turin",
-            _ => {
-                eprintln!("SKIP: unknown cpuid fam={fam:#x} mdl={mdl:#x} for KDS product");
-                return None;
-            }
-        }
-        .into()
-    };
-    // TCB byte layout below is Milan/Genoa; Turin reshuffled it.
-    let url = format!(
-        "https://kdsintf.amd.com/vcek/v1/{product}/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
-        hex(report.chip_id()),
-        tcb[0],
-        tcb[1],
-        tcb[6],
-        tcb[7],
-    );
-    eprintln!("fetching VCEK: {url}");
-    let der = match ureq::get(&url).call() {
-        Ok(r) => {
-            let mut v = Vec::new();
-            r.into_reader().read_to_end(&mut v).ok()?;
-            v
-        }
-        Err(e) => {
-            eprintln!("SKIP: KDS fetch failed ({e}); set U2FE_KDS_PRODUCT or pre-seed {cache:?}");
-            return None;
-        }
-    };
-    let _ = fs::write(&cache, &der);
-    Some(der)
-}
-
-/// Pull the SEC1 uncompressed point out of an x509 DER cert. VCEK certs
-/// always carry the EC pubkey as `BIT STRING(98){0x00, 0x04, x[48], y[48]}`;
-/// scanning for that header is far smaller than a real x509 parser and the
-/// false-positive risk is nil for these fixed-shape AMD certs.
-fn vcek_pubkey(der: &[u8]) -> VerifyingKey {
-    let needle = [0x03, 0x62, 0x00, 0x04];
-    let i = der
-        .windows(4)
-        .position(|w| w == needle)
-        .expect("no P-384 SEC1 point in VCEK");
-    VerifyingKey::from_sec1_bytes(&der[i + 3..i + 3 + 97]).expect("VCEK pubkey")
-}
-
-pub fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }

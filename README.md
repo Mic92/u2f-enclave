@@ -25,7 +25,7 @@ rather than as a fork of an existing SVSM.
 
 ## Usage
 
-The whole project ships as a single ~800 KB Linux/x86_64 binary,
+The whole project ships as a single Linux/x86_64 binary,
 `u2f-enclave`, with the guest image baked in. Running it makes a
 standard FIDO2 HID device appear; anything that speaks WebAuthn or CTAP2
 (browsers, `ssh-keygen -t ecdsa-sk`, `pam_u2f`, `fido2-token`) will pick
@@ -101,7 +101,7 @@ Run `u2f-enclave --help` for the rest.
 | `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process, and recomputes the launch measurement offline. ~1.2 kLoC. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `vmm` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
-| `e2e`    | std               | Integration tests: drive `libfido2` and OpenSSH against `sim`/`vmm`; act as an SNP-aware relying party (raw-hidraw CTAPHID client, AMD KDS fetch, P-384 verify). |
+| `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
 
 No QEMU, no firmware, no IGVM, no `kvm-bindings`/`kvm-ioctls`, no SVSM
 protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
@@ -133,14 +133,33 @@ If all three pass, the new credential's private key exists only inside
 an encrypted VM running this exact binary on a genuine AMD chip. There
 is no step four.
 
+`u2f-enclave verify` does checks 2 and 3 for you — pipe in the 1184
+bytes, get exit status 0 plus the `report_data` to compare:
+
+```console
+$ u2f-enclave verify < report.bin
+report_data   8b62bb32e6605accd748ecfee6922874…   ← == SHA-512(authData||cdh)?
+measurement   70eabebbf79908ce…  ok
+policy        0x30000  ok
+chip_id       f59a25d8302ed76a
+reported_tcb  0x581b00000000000a
+vcek_sig      ok
+$ echo $?
+0
+```
+
+It fetches the VCEK from AMD's KDS (cached under `$XDG_CACHE_HOME`); for
+air-gapped use, pass `--vcek FILE`. Check 1 stays with you because you
+have `authData`/`clientDataHash` and the verifier doesn't — it's one
+SHA-512 in any language. Runs on any x86_64 Linux box; same binary, no
+AMD hardware needed. Source: `vmm/src/verify.rs` (~190 LoC).
+
 **Why keys survive a restart:** the authenticator never stores its
 master secret. On every launch it asks the PSP to re-derive it from the
 chip's fused key and the launch measurement. Same binary on the same
 chip gives the same secret back; change either and old credentials just
 stop working. No sealed blobs, no host-side state, nothing to back up.
 
-`e2e/src/snp.rs` is a working reference implementation of all three
-checks (≈280 LoC, RustCrypto `p384` + a 4-line DER scan + `ureq`).
 
 ## Status
 

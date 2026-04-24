@@ -7,6 +7,7 @@
 //! device name and one vsock CID.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, Once};
@@ -98,6 +99,16 @@ pub fn need_writable(path: &str) -> bool {
             false
         }
     }
+}
+
+pub fn pipe(cmd: &mut Command, stdin: &[u8]) -> Output {
+    let mut c = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}"));
+    c.stdin.take().unwrap().write_all(stdin).unwrap();
+    c.wait_with_output().unwrap()
 }
 
 pub fn run(cmd: &mut Command) -> Output {

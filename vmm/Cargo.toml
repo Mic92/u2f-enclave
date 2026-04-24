@@ -14,3 +14,5 @@ libc = "0.2"
 bridge = { path = "../bridge" }
 vsock = "0.5"
 sha2 = "0.10"
+p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+ureq = "2"

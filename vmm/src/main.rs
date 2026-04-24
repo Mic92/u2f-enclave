@@ -16,6 +16,7 @@ mod kvm;
 mod measure;
 mod mmio;
 mod snp;
+mod verify;
 mod vhost;
 
 const MEM_SIZE: usize = 8 * 1024 * 1024;
@@ -30,11 +31,20 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure              print the expected SNP launch
-                                     measurement and exit (no /dev/kvm needed)
+  u2f-enclave --measure              print this build's expected SNP launch
+                                     measurement and exit
+  u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
+                                     check its VCEK signature and that its
+                                     measurement matches this build; print
+                                     report_data for the caller's binding
+                                     check; exit 0 iff ok
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
+  --vcek FILE  use this VCEK DER instead of fetching from AMD KDS
+               (fetched certs are cached under $XDG_CACHE_HOME/u2f-enclave)
+
+--measure and verify need no /dev/* access and run on any x86_64 Linux.
 
 Needs rw access to /dev/kvm, /dev/uhid, /dev/vhost-vsock and (with --snp)
 /dev/sev. One-time setup:
@@ -46,6 +56,14 @@ fn main() -> io::Result<()> {
     if args.peek().is_some_and(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
         return Ok(());
+    }
+    if args.next_if_eq("verify").is_some() {
+        let vcek = args.next_if_eq("--vcek").and_then(|_| args.next());
+        if args.next().is_some() {
+            eprint!("{USAGE}");
+            std::process::exit(2);
+        }
+        std::process::exit(verify::cmd(vcek, expected_measurement()?));
     }
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();
@@ -279,6 +297,19 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
         })
 }
 
+fn expected_measurement() -> io::Result<[u8; 48]> {
+    let mut mem = vec![0u8; MEM_SIZE];
+    let img = elf::load(ENCLAVE, &mut mem)?;
+    let vmsa = measure::vmsa_page(img.entry);
+    Ok(measure::launch_digest(
+        &mem,
+        img.lo,
+        img.hi,
+        snp::SECRETS_GPA,
+        &vmsa,
+    ))
+}
+
 /// Recompute the launch measurement from the embedded ELF: hex to stdout
 /// (so it composes), context to stderr.
 fn print_measure() -> io::Result<()> {
@@ -287,8 +318,7 @@ fn print_measure() -> io::Result<()> {
     let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
 
-    let hex: String = ld.iter().map(|b| format!("{b:02x}")).collect();
-    println!("{hex}");
+    println!("{}", verify::hex(&ld));
     io::stdout().flush()?;
     eprintln!(
         "↑ expected SEV-SNP launch measurement for this build.\n  \
