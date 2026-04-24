@@ -72,13 +72,24 @@ same keys across restarts.
 ```console
 $ u2f-enclave --measure 51
 70eabebbf79908ce762df385e22606ee97496e923305fd3fdff0f651309bf3dd463427edaa43dfa6092a1d365c6b6a8a
+↑ expected SEV-SNP launch measurement for this build.
+  An attStmt["snp"] report from `u2f-enclave --snp` carries this at
+  bytes 0x90..0xc0; check it after verifying the VCEK signature.
+inputs:
+  guest image  0x100000..0x17b000 (492 KiB, 123 pages)
+  entry        0x1000c8
+  secrets gpa  0x1000
+  vmsa gpa     0xfffffffff000
+  policy       0x30000
+  c-bit        51
 ```
 
-prints the expected SNP launch measurement for this build (the `51` is
-the SEV C-bit position; every shipping SNP CPU uses 51). No AMD hardware
-required — run it in CI next to a reproducible build and you have the
-allow-list value to check `attStmt["snp"].measurement` against. See
-[Attestation](#attestation-in-one-paragraph) below for the full check.
+No AMD hardware required — run it in CI next to a reproducible build and
+you have the allow-list value. The hex digest goes to stdout alone, so
+`expected=$(u2f-enclave --measure 51)` works. The `51` is the SEV C-bit
+position (defaults to this host's; every shipping SNP CPU uses 51). See
+[Attestation](#attestation-in-one-paragraph) below for the full check an
+RP performs.
 
 Run `u2f-enclave --help` for the rest.
 

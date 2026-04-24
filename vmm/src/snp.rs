@@ -27,7 +27,7 @@ pub const SECRETS_GPA: u64 = 0x1000;
 
 /// Bit 17 must be set; bit 16 (SMT) must be set on SMT hosts or the PSP
 /// rejects the launch (`SNP_POLICY_MASK_RSVD_MBO`/`_SMT`).
-const SNP_POLICY: u64 = (1 << 17) | (1 << 16);
+pub const SNP_POLICY: u64 = (1 << 17) | (1 << 16);
 
 #[repr(C)]
 #[derive(Default)]

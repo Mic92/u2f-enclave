@@ -283,7 +283,9 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
 
 /// Recompute the launch measurement from the embedded ELF and print it. The
 /// only environmental input is the C-bit position; default to the host's so
-/// `vmm --measure` on the launching machine matches `vmm --snp` on it.
+/// `--measure` on the launching machine matches `--snp` on it. Hex goes to
+/// stdout alone so it composes (`m=$(u2f-enclave --measure)`); the
+/// human-readable context goes to stderr.
 fn print_measure(c_bit: Option<String>) -> io::Result<()> {
     let c_bit: u32 = c_bit
         .map(|s| s.parse().expect("--measure: C_BIT must be an integer"))
@@ -292,10 +294,37 @@ fn print_measure(c_bit: Option<String>) -> io::Result<()> {
     let img = elf::load(ENCLAVE, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry, c_bit);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
-    for b in ld {
-        print!("{b:02x}");
-    }
-    println!();
+
+    let hex: String = ld.iter().map(|b| format!("{b:02x}")).collect();
+    println!("{hex}");
+    io::stdout().flush()?;
+    eprintln!(
+        "↑ expected SEV-SNP launch measurement for this build.\n  \
+         An attStmt[\"snp\"] report from `u2f-enclave --snp` carries this at\n  \
+         bytes 0x90..0xc0; check it after verifying the VCEK signature.\n\
+         inputs:\n  \
+         guest image  {:#x}..{:#x} ({} KiB, {} pages)\n  \
+         entry        {:#x}\n  \
+         secrets gpa  {:#x}\n  \
+         vmsa gpa     {:#x}\n  \
+         policy       {:#x}\n  \
+         c-bit        {c_bit}{}",
+        img.lo,
+        img.hi,
+        (img.hi - img.lo) >> 10,
+        (img.hi - img.lo) >> 12,
+        img.entry,
+        snp::SECRETS_GPA,
+        measure::VMSA_GPA,
+        snp::SNP_POLICY,
+        // The C-bit is a high physical-address bit; anything below 32 means
+        // CPUID 0x8000_001f is absent and we read garbage.
+        if c_bit < 32 {
+            "  ← implausible; this host has no SEV CPUID leaf, pass C_BIT (51) explicitly"
+        } else {
+            ""
+        },
+    );
     Ok(())
 }
 
