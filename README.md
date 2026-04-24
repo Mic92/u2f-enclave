@@ -34,10 +34,14 @@ minimal TCB rather than a fork of an existing SVSM.
 ## Status / milestones
 
 - **M0** – CTAPHID transport, `CTAPHID_INIT`/`PING`/`WINK`, CTAP2 `getInfo`.
-- **M1 (current)** – `makeCredential` / `getAssertion` (ES256 via RustCrypto
-  `p256`), stateless non-resident credentials, `fmt:"packed"` self-attestation.
-  Full register → attest-verify → assert → sig-verify round-trip passes
-  against Yubico `libfido2` (`scripts/smoke-libfido2.sh`).
+- **M1** – `makeCredential` / `getAssertion` (ES256 via RustCrypto `p256`),
+  stateless non-resident credentials, `fmt:"packed"` self-attestation.
+  Verified against two independent stacks: Yubico `libfido2`
+  (`scripts/smoke-libfido2.sh`) and OpenSSH `sk-ecdsa` keygen+login
+  (`scripts/smoke-ssh.sh`).
+- **M2 (in progress)** – bare-metal unikernel. Stage 1 done: PVH boot, the
+  full authenticator runs in a 25 KB `x86_64-unknown-none` ELF under plain
+  QEMU (`scripts/boot-enclave.sh`). Next: virtio-vsock, then SEV-SNP.
 - **M2** – SEV-SNP unikernel target, virtio-vsock, embed SNP attestation
   report in a custom `fmt:"sev-snp"` attestation statement.
 - **M3** – resident keys, `clientPIN`, TDX.
