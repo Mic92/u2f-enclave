@@ -18,8 +18,10 @@ use linked_list_allocator::LockedHeap;
 mod boot;
 mod greq;
 mod platform;
+mod pv;
 mod serial;
 mod sev;
+mod tdx;
 mod virtio;
 mod vsock;
 
@@ -32,14 +34,14 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static ALLOC: LockedHeap = LockedHeap::empty();
 
 /// 64-bit entry, far-jumped to from `ram32.s` with a valid stack,
-/// [0, 4 GiB) identity-mapped, and `c_bit` = SEV C-bit position the vmm
-/// passed in `%esi` (0 ⇒ plain VM).
+/// [0, 4 GiB) identity-mapped, and `tag` saying which paravirt backend to
+/// bring up: 0 = plain VM, 1 = TDX, ≥32 = SEV (C-bit position).
 #[no_mangle]
-pub extern "C" fn rust64_start(c_bit: u32) -> ! {
-    if c_bit != 0 {
-        // Brings up the GHCB; everything below is then identical for plain
-        // and encrypted boots.
-        sev::init(c_bit);
+pub extern "C" fn rust64_start(tag: u32) -> ! {
+    if tag == 1 {
+        tdx::init();
+    } else if tag != 0 {
+        sev::init(tag);
         greq::init();
     }
 
@@ -51,6 +53,13 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     serial::print("u2f-enclave: boot\n");
     if sev::active() {
         serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
+    }
+    if tdx::active() {
+        // vsock rings are not yet flipped to shared under TDX, so the
+        // vhost data path can't reach them. Halt cleanly once serial has
+        // proven the launch + paravirt I/O round-trip.
+        serial::print("u2f-enclave: TDX active, paravirt up\n");
+        debug_exit(0);
     }
 
     let Some(vs) = vsock::init(VSOCK_PORT) else {
@@ -77,9 +86,9 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
 /// process exit code of `(code << 1) | 1`. Falls back to `hlt` if nobody is
 /// listening.
 fn debug_exit(code: u32) -> ! {
-    sev::outl(0xf4, code);
+    pv::outl(0xf4, code);
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        pv::hlt();
     }
 }
 

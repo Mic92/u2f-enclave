@@ -8,7 +8,7 @@
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
-use crate::sev;
+use crate::pv;
 use core::sync::atomic::{compiler_fence, Ordering};
 
 /// Where `vmm` places the single virtio-mmio window (and where QEMU microvm
@@ -51,18 +51,10 @@ impl Mmio {
         Self { base }
     }
     fn r(&self, off: usize) -> u32 {
-        if sev::active() {
-            sev::mmio_read32(self.base + off as u64)
-        } else {
-            unsafe { read_volatile((self.base as usize + off) as *const u32) }
-        }
+        pv::mmio_read32(self.base + off as u64)
     }
     fn w(&self, off: usize, v: u32) {
-        if sev::active() {
-            sev::mmio_write32(self.base + off as u64, v);
-        } else {
-            unsafe { write_volatile((self.base as usize + off) as *mut u32, v) };
-        }
+        pv::mmio_write32(self.base + off as u64, v);
     }
 
     pub fn probe(&self) -> Option<u32> {

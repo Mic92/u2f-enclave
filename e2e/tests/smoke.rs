@@ -1,5 +1,7 @@
 use std::fs;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use e2e::*;
 
@@ -16,6 +18,47 @@ fn libfido2_vmm() {
     }
     let be = vmm_backend(false);
     fido2_roundtrip(&be.hidraw);
+}
+
+/// TDX encrypted launch: reset stub at 4 GiB-16, ram32_tdx, paravirt port
+/// I/O via TDVMCALL. The guest halts after printing its banner; vsock comes
+/// in the next commit.
+#[test]
+fn tdx_boot() {
+    let _g = serial_guard();
+    if !need_writable("/dev/kvm") || !have_tdx() {
+        return;
+    }
+    let mut procs = Procs::default();
+    let child = procs.push(
+        Command::new(host_bin("u2f-enclave"))
+            .arg("--tdx")
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut err = child.stderr.take().unwrap();
+    let mut out = String::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut buf = [0u8; 256];
+    loop {
+        match err.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                eprint!("{}", String::from_utf8_lossy(&buf[..n]));
+                if out.contains("TDX active, paravirt up") {
+                    return;
+                }
+            }
+            Err(e) => panic!("read stderr: {e}"),
+        }
+        if Instant::now() > deadline {
+            break;
+        }
+    }
+    panic!("guest never printed TDX banner; output:\n{out}");
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via

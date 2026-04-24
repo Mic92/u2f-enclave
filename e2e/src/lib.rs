@@ -240,6 +240,17 @@ pub fn have_snp() -> bool {
             .unwrap_or(false)
 }
 
+pub fn have_tdx() -> bool {
+    if !fs::read_to_string("/sys/module/kvm_intel/parameters/tdx")
+        .map(|s| s.trim() == "Y")
+        .unwrap_or(false)
+    {
+        eprintln!("SKIP: kvm_intel tdx not enabled");
+        return false;
+    }
+    true
+}
+
 /// libfido2 register → verify-attestation → assert → verify-signature.
 /// Passing means our CTAPHID, CBOR, credential derivation and DER encoding
 /// are accepted by an independent implementation end to end.

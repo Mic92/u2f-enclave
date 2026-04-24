@@ -20,13 +20,19 @@ fn u64le(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(rd(b, off))
 }
 
+/// The TDX reset stub lives in its own PT_LOAD at this GPA.
+pub const RESET_GPA: u64 = 0xFFFF_F000;
+
 pub struct Loaded {
     pub entry: u32,
-    /// Page-aligned [lo, hi) extent covering every PT_LOAD; this is what the
-    /// SNP launch must encrypt+measure so the guest finds its code, page
+    /// Page-aligned [lo, hi) extent covering the low PT_LOAD; this is what
+    /// the SNP launch encrypts+measures so the guest finds its code, page
     /// tables, .bss heap and stack all pre-validated.
     pub lo: u64,
     pub hi: u64,
+    /// Contents of the TDX reset page at `RESET_GPA`; only the TDX path
+    /// maps it.
+    pub reset: [u8; 4096],
 }
 
 pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<Loaded> {
@@ -38,6 +44,7 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<Loaded> {
     let phnum = u16le(img, 56) as usize;
     let mut entry32 = None;
     let (mut lo, mut hi) = (u64::MAX, 0u64);
+    let mut reset = [0u8; 4096];
 
     for i in 0..phnum {
         let ph = &img[phoff + i * phentsize..];
@@ -48,6 +55,9 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<Loaded> {
         let memsz = u64le(ph, 40) as usize;
 
         match p_type {
+            PT_LOAD if paddr as u64 == RESET_GPA => {
+                reset[..filesz].copy_from_slice(&img[off..off + filesz]);
+            }
             PT_LOAD => {
                 mem.get_mut(paddr..paddr + memsz)
                     .ok_or_else(|| io::Error::other("PT_LOAD outside guest memory"))?
@@ -77,5 +87,6 @@ pub fn load(img: &[u8], mem: &mut [u8]) -> io::Result<Loaded> {
         entry: entry32.ok_or_else(|| io::Error::other("no PVH PHYS32_ENTRY note"))?,
         lo: lo & !0xfff,
         hi: hi.next_multiple_of(0x1000),
+        reset,
     })
 }

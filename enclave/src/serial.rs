@@ -1,10 +1,9 @@
 //! 16550 UART on the legacy COM1 port for bring-up logging.
 //!
-//! Port I/O goes through `sev::{inb,outb}` which transparently routes via
-//! the GHCB when running encrypted; the vmm sees plain `KVM_EXIT_IO` either
-//! way.
+//! Port I/O routes through `pv` so the vmm sees plain `KVM_EXIT_IO`
+//! whether the guest is plain, SEV-SNP or TDX.
 
-use crate::sev::{inb, outb};
+use crate::pv::{inb, outb};
 
 const COM1: u16 = 0x3F8;
 
