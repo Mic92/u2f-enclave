@@ -17,6 +17,7 @@ use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 use linked_list_allocator::LockedHeap;
 
+mod boot;
 mod platform;
 mod serial;
 
@@ -26,11 +27,10 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
 static ALLOC: LockedHeap = LockedHeap::empty();
 
-/// ELF entry. Not yet reachable: the PVH stub (stage 1) / IGVM initial VMSA
-/// (stage 2) that establish 64-bit mode and a stack before jumping here are
-/// still to come. See `DESIGN.md`.
+/// 64-bit entry, far-jumped to from `ram32.s` with a valid stack and
+/// [0, 2 MiB) identity-mapped.
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn rust64_start() -> ! {
     // SAFETY: single-threaded, runs once before any allocation.
     unsafe {
         ALLOC.lock().init(addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
@@ -41,7 +41,7 @@ pub extern "C" fn _start() -> ! {
     kmain();
 
     serial::print("u2f-enclave: halt\n");
-    halt();
+    qemu_exit(0);
 }
 
 fn kmain() {
@@ -59,7 +59,10 @@ fn kmain() {
     //   read 64B -> auth.process_report -> write all 64B replies
 }
 
-fn halt() -> ! {
+/// Exit QEMU via `isa-debug-exit`; falls back to `hlt` on real hardware.
+/// QEMU's exit status is `(code << 1) | 1`, so 0 → 1, anything else → odd>1.
+fn qemu_exit(code: u32) -> ! {
+    unsafe { asm!("out dx, eax", in("dx") 0xf4u16, in("eax") code) };
     loop {
         unsafe { asm!("hlt", options(nomem, nostack)) };
     }
@@ -74,5 +77,5 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         serial::print_u32(loc.line());
     }
     serial::print("\n");
-    halt();
+    qemu_exit(0x31);
 }

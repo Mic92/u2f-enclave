@@ -1,0 +1,5 @@
+[target.x86_64-unknown-none]
+# The boot stub and the GDT/PVH-note statics need link-time absolute
+# addresses; the default for this target is PIC, which would require a
+# runtime relocation pass we have no loader for.
+rustflags = ["-Crelocation-model=static"]

@@ -4,15 +4,13 @@ The `ctap` crate links into a ~27 KB stripped `x86_64-unknown-none` ELF with a
 heap, panic handler and RDRAND-backed `Platform`. What remains is boot glue
 and two drivers. Everything below is additive on top of `src/main.rs`.
 
-## Stage 1 — boot under plain QEMU (no SEV)
+## Stage 1 — boot under plain QEMU (no SEV) — **done**
 
-Goal: `qemu-system-x86_64 -kernel enclave` prints the bring-up banner.
-
-- `boot.S`: PVH entry note + 32→64-bit trampoline (static page tables
-  identity-mapping the low 1 GiB, load CR3, set LME+PG, `lret` into `_start`).
-  Reference: `coconut-svsm/stage1/` and any rust-osdev PVH example.
-- `link.ld`: load at a fixed PA (e.g. `0x200000`), drop PIE.
-- `serial.rs` already works once `out`/`in` reach the device.
+PVH ELF note + 32→64-bit trampoline (`ram32.s`) + linker script at 1 MiB +
+one 2 MiB identity page. `scripts/boot-enclave.sh` builds, boots under
+`qemu -kernel`, prints the banner, runs a CTAP report through the
+authenticator, and exits via `isa-debug-exit`. Pattern lifted from
+`cloud-hypervisor/rust-hypervisor-firmware`.
 
 ## Stage 2 — SEV-SNP enable
 
