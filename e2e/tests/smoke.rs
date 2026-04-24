@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use e2e::*;
 
@@ -38,24 +38,21 @@ fn tdx_boot() {
             .spawn()
             .unwrap(),
     );
+    // The pipe read below blocks; bound the test by killing the child if
+    // it has not exited on its own (which the guest's debug_exit does).
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    });
     let mut err = child.stderr.take().unwrap();
     let mut out = String::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
     let mut buf = [0u8; 256];
-    loop {
-        match err.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.push_str(&String::from_utf8_lossy(&buf[..n]));
-                eprint!("{}", String::from_utf8_lossy(&buf[..n]));
-                if out.contains("TDX active, paravirt up") {
-                    return;
-                }
-            }
-            Err(e) => panic!("read stderr: {e}"),
-        }
-        if Instant::now() > deadline {
-            break;
+    while let Ok(n @ 1..) = err.read(&mut buf) {
+        out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        eprint!("{}", String::from_utf8_lossy(&buf[..n]));
+        if out.contains("TDX active, paravirt up") {
+            return;
         }
     }
     panic!("guest never printed TDX banner; output:\n{out}");

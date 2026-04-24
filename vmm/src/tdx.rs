@@ -225,16 +225,25 @@ impl Tdx {
             (low_uaddr as u64, low_gpa, low_len),
             (self.reset_va as u64, RESET_GPA, 0x1000),
         ] {
-            tdx_op(
-                vcpu,
-                KVM_TDX_INIT_MEM_REGION,
-                KVM_TDX_MEASURE_MEMORY_REGION,
-                &TdxInitMem {
-                    source_addr: src,
-                    gpa,
-                    nr_pages: len >> 12,
-                } as *const _ as u64,
-            )?;
+            // Kernel writes back remaining work on -EINTR; loop like SNP's
+            // LAUNCH_UPDATE.
+            let mut r = TdxInitMem {
+                source_addr: src,
+                gpa,
+                nr_pages: len >> 12,
+            };
+            while r.nr_pages > 0 {
+                match tdx_op(
+                    vcpu,
+                    KVM_TDX_INIT_MEM_REGION,
+                    KVM_TDX_MEASURE_MEMORY_REGION,
+                    &mut r as *mut _ as u64,
+                ) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
         }
 
         tdx_op(vm, KVM_TDX_FINALIZE_VM, 0, 0)?;
@@ -250,9 +259,9 @@ fn tdx_op(fd: &impl AsRawFd, id: u32, flags: u32, data: u64) -> io::Result<()> {
         hw_error: 0,
     };
     ioctl_ref(fd, kvm::KVM_MEMORY_ENCRYPT_OP, &mut cmd).map_err(|e| {
-        io::Error::other(format!(
-            "KVM_TDX cmd={id}: {e} (hw_error={:#x})",
-            cmd.hw_error
-        ))
+        io::Error::new(
+            e.kind(),
+            format!("KVM_TDX cmd={id}: {e} (hw_error={:#x})", cmd.hw_error),
+        )
     })
 }

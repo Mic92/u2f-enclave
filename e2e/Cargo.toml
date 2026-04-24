@@ -10,3 +10,4 @@ publish = false
 [dependencies]
 ctap = { path = "../ctap" }
 sha2 = "0.10"
+libc = "0.2"

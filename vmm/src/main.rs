@@ -287,9 +287,11 @@ fn main() -> io::Result<()> {
                         std::process::exit(reason as i32);
                     }
                     kvm::SYSTEM_EVENT_TDX_FATAL => {
+                        // KVM dumps GPRs in VCPU_REGS_* order; r12 is the
+                        // GHCI error code.
                         eprintln!(
                             "u2f-enclave: TDX fatal r12={:#x} r13={:#x}",
-                            ev.data[3], ev.data[4]
+                            ev.data[12], ev.data[13]
                         );
                         std::process::exit(0x7f);
                     }

@@ -51,7 +51,7 @@ fn tdvmcall(r11: u64, r12: u64, r13: u64, r14: u64, r15: u64) -> (u64, u64) {
         asm!(
             ".byte 0x66, 0x0f, 0x01, 0xcc",  // TDCALL
             inout("rax") TDG_VP_VMCALL => _,
-            in("rcx") VMCALL_EXPOSE,
+            inout("rcx") VMCALL_EXPOSE => _,
             inout("r10") 0u64 => r10,
             inout("r11") r11 => r11o,
             inout("r12") r12 => _,
