@@ -62,18 +62,14 @@ u2f-enclave: SEV-SNP launch ok (492 KiB measured)
 u2f-enclave: ready at /dev/hidraw3
 ```
 
-Now the host cannot read the keys, every `makeCredential` carries an
-attestation report signed by the chip's security processor, and the
-master secret is derived from this binary's launch measurement — same
-binary on same chip ⇒ same keys across restarts.
+Now the host cannot read the keys, every registration carries a signed
+attestation report, and keys survive restarts (see
+[Key persistence](#key-persistence)).
 
-### See it work
+### See the attestation
 
-The point of attestation is that the **verifier doesn't trust the
-authenticator's host** — so produce the report on the SNP machine, then
+The verifier doesn't trust the SNP host — so produce a report there and
 check it somewhere else.
-
-On the SNP host (where `u2f-enclave --snp` is running):
 
 ```console
 snp-host$ u2f-enclave attest > report.bin
@@ -82,27 +78,22 @@ attest: report_data == SHA-512(authData||cdh)
 attest: cred_id      5e48c479276d74f3…
 ```
 
-`attest` is a stand-in for a browser/SSH client: it registers a
-credential over hidraw, checks the report binds it (check 1), and writes
-the 1184-byte report to stdout.
+`attest` stands in for a browser: it registers a credential over hidraw,
+checks the report is tied to it, and writes the 1184-byte report.
 
-You also need the chip's certificate from AMD. `vcek-url` turns a report
-into the fetch URL; run it on whichever side has network (it only reads
-the report, no devices). The certificate is good until that chip's next
-microcode update, so the SNP host's operator can fetch it once and ship
-it alongside everything else.
+Fetch the chip's AMD certificate (good until that chip's next microcode
+update; whichever side has network can do this):
 
 ```console
 $ curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"
 ```
 
-Now verify — any Linux box with the same `u2f-enclave` binary; no AMD
-hardware, no `/dev/kvm`:
+Verify — any Linux box with the same binary, no AMD hardware needed:
 
 ```console
 laptop$ u2f-enclave verify --vcek vcek.der < report.bin
 report_data   6f020c9e5d1731ca…
-measurement   70eabebbf79908ce…  ok
+measurement   70eabebbf79908ce…  ok (matches this build)
 policy        0x30000  ok
 chip_id       f59a25d8302ed76a
 reported_tcb  0x581b00000000000a
@@ -111,22 +102,58 @@ laptop$ echo $?
 0
 ```
 
-`verify` checks the report's signature against that certificate
-(check 2), then recomputes the measurement for the guest image
-embedded in itself and compares (check 3). Exit status 0 means: a
-genuine AMD chip signed this, and what it measured matches what this
-binary would launch.
+Exit 0 means: a genuine AMD chip signed this, and what it measured
+matches what this binary would launch. `--measure` prints just the
+measurement hex if you'd rather hard-code it; `--help` lists everything.
 
-That's the whole loop. In a real deployment `attest` is replaced by a
-browser posting a registration to your server —
-[How attestation works](#how-attestation-works) shows that variant and
-what each check proves. If you'd rather hard-code the expected
-measurement in your own verifier instead of shelling out,
-`u2f-enclave --measure` prints just the hex (it depends only on the
-binary, so CI can produce it). On one box,
-`u2f-enclave attest | u2f-enclave verify` runs the lot.
+## How attestation works
 
-Run `u2f-enclave --help` for the rest.
+The `makeCredential` response is standard WebAuthn `fmt:"packed"`
+self-attestation — any FIDO2 library accepts it as-is — plus one extra
+field, `attStmt["snp"]`: the 1184-byte report. Libraries that don't know
+about it ignore it.
+
+A relying party that wants the hardware guarantee does three checks on
+that report:
+
+1. **Bound to this credential?** `report_data` (bytes `0x50..0x90`) must
+   equal `SHA-512(authData ‖ clientDataHash)` — the same bytes the
+   credential's own signature covers, so the report can't have been
+   lifted from another registration.
+2. **Signed by real AMD silicon?** AMD publishes a certificate (the
+   *VCEK*) for every chip and firmware version. `vcek-url` builds the
+   fetch URL from the report; verify the report's signature against it.
+3. **Running the code you audited?** `measurement` (bytes `0x90..0xc0`)
+   must match the build you reviewed. `--measure` computes that value;
+   the test suite checks it against a real chip. If the computation were
+   ever wrong you'd reject good reports, not accept bad ones.
+
+All three pass → the credential's private key exists only inside an
+encrypted VM running this exact binary on a genuine AMD chip.
+
+`verify` does 2 and 3; you do 1 (you have `authData`/`clientDataHash`,
+it doesn't). Your server gets the report as `attStmt["snp"]` in the
+WebAuthn `attestationObject` the browser posts; whatever WebAuthn
+library you use exposes `attStmt` as a map. In Python:
+
+```python
+import cbor2, hashlib, subprocess
+obj    = cbor2.loads(attestation_object)             # bytes from the browser
+report = obj["attStmt"]["snp"]
+r = subprocess.run(["u2f-enclave", "verify", "--vcek", "vcek.der"],
+                   input=report, capture_output=True, text=True)
+bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
+ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
+```
+
+## Key persistence
+
+The authenticator never stores its master secret. On every launch it
+asks the chip to re-derive it from a key burned into the silicon plus
+the launch measurement. Same binary on the same chip ⇒ same secret ⇒
+credentials keep working across restarts; change either and old
+credentials stop resolving. No encrypted state files, no host-side
+storage, nothing to back up.
 
 ## What's in the box
 
@@ -134,71 +161,13 @@ Run `u2f-enclave --help` for the rest.
 | -------- | ----------------- | ------------------------------------------------------------------ |
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
 | `enclave`| `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `vmm`. See [DESIGN.md](enclave/DESIGN.md). |
-| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest` subcommands. |
+| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest`/`vcek-url` subcommands. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `vmm` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
 
 No QEMU, no firmware, no IGVM, no `kvm-bindings`/`kvm-ioctls`, no SVSM
 protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
-
-## How attestation works
-
-The `makeCredential` response is standard WebAuthn `fmt:"packed"`
-self-attestation — any FIDO2 library accepts it as-is. It also carries one
-extra field, `attStmt["snp"]`: a 1184-byte report signed by the AMD chip's
-security processor. Libraries that don't know about it ignore it.
-
-A relying party that wants the hardware guarantee does three checks on
-that report:
-
-1. **Bound to this credential?** The report's `report_data` (bytes
-   `0x50..0x90`) must equal `SHA-512(authData ‖ clientDataHash)`. Those
-   are the exact bytes the credential's self-signature covers, so the
-   report can't have been lifted from some other registration.
-2. **Signed by real AMD silicon?** AMD publishes a certificate (the
-   *VCEK*) for every chip and firmware version, looked up by the
-   report's `chip_id` and `reported_tcb`. Fetch it and verify the
-   report's signature against it.
-3. **Running the code you audited?** The report's `measurement` (bytes
-   `0x90..0xc0`) must match the build you reviewed.
-   `u2f-enclave --measure` computes that value without AMD hardware; the
-   test suite checks it against a real chip. If the computation were ever
-   wrong you'd reject good reports, not accept bad ones.
-
-If all three pass, the new credential's private key exists only inside
-an encrypted VM running this exact binary on a genuine AMD chip. There
-is no step four.
-
-`u2f-enclave verify` does checks 2 and 3 for you. The 1184 bytes are
-`attStmt["snp"]` in the WebAuthn `attestationObject` your server gets
-from `navigator.credentials.create()`; whatever WebAuthn library you
-already use will hand you `attStmt` as a map. In Python, the whole
-relying-party check is:
-
-```python
-import cbor2, hashlib, subprocess
-obj    = cbor2.loads(attestation_object)          # bytes from the browser
-report = obj["attStmt"]["snp"]                    # 1184 bytes
-r = subprocess.run(["u2f-enclave", "verify"], input=report,
-                   capture_output=True, text=True)
-bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
-ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
-```
-
-Get `vcek.der` once with
-`curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"` (or run
-`verify` without `--vcek` and it prints the same command, looking in
-`$XDG_CACHE_HOME/u2f-enclave` first). Runs on any x86_64 Linux box; same
-binary, no AMD hardware needed.
-
-**Why keys survive a restart:** the authenticator never stores its
-master secret. On every launch it asks the chip to re-derive it from a
-key burned into the silicon plus the launch measurement. Same binary on
-the same chip gives the same secret back; change either and old
-credentials just stop working. No encrypted state files, no host-side
-storage, nothing to back up.
-
 
 ## Status
 
