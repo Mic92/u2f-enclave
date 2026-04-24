@@ -305,8 +305,6 @@ fn read_ga_options(r: &mut Reader<'_>) -> Result<(), u8> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- tests ---
-
 #[cfg(test)]
 mod tests {
     use super::*;
