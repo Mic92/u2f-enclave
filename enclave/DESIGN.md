@@ -1,55 +1,73 @@
-# Enclave unikernel (M2)
+# Enclave unikernel
 
-The host-testable `ctap` crate is the authenticator; this directory will hold
-the `no_std` kernel that boots it inside an SEV-SNP guest. Nothing here builds
-yet — this document records the plan and the bits of COCONUT-SVSM worth
-cribbing.
+The `ctap` crate links into a ~27 KB stripped `x86_64-unknown-none` ELF with a
+heap, panic handler and RDRAND-backed `Platform`. What remains is boot glue
+and two drivers. Everything below is additive on top of `src/main.rs`.
 
-## Responsibilities
+## Stage 1 — boot under plain QEMU (no SEV)
 
-1. Bring up a single CPU, enable paging, set up a heap (`alloc`).
-2. Handle `#VC` exceptions and speak the GHCB protocol so `CPUID`, MMIO and
-   MSR accesses work under SEV-ES/SNP.
-3. Drive **virtio-vsock** (MMIO transport) and accept one connection.
-4. Issue `SNP_GUEST_REQUEST` to obtain an attestation report on demand.
-5. Run `ctap::Authenticator::process_report` in a loop over the vsock stream.
+Goal: `qemu-system-x86_64 -kernel enclave` prints the bring-up banner.
 
-No network stack, no filesystem, no multi-tasking.
+- `boot.S`: PVH entry note + 32→64-bit trampoline (static page tables
+  identity-mapping the low 1 GiB, load CR3, set LME+PG, `lret` into `_start`).
+  Reference: `coconut-svsm/stage1/` and any rust-osdev PVH example.
+- `link.ld`: load at a fixed PA (e.g. `0x200000`), drop PIE.
+- `serial.rs` already works once `out`/`in` reach the device.
 
-## What to lift from COCONUT-SVSM (MIT)
+## Stage 2 — SEV-SNP enable
 
-| Need                | Where in coconut-svsm                          |
-| ------------------- | ---------------------------------------------- |
-| `#VC` handler, GHCB | `kernel/src/cpu/vc.rs`, `kernel/src/sev/ghcb.rs` |
-| SNP guest request   | `kernel/src/greq/`                             |
-| Early page tables   | `kernel/src/mm/`                               |
-| virtio MMIO         | `virtio-drivers/` (already a separate crate)   |
-| IGVM packaging      | `tools/igvmbuilder/`, `tools/igvmmeasure/`     |
+Under SEV-ES every `cpuid`/`in`/`out`/`rdmsr` raises `#VC`. The handler talks
+to the hypervisor via the GHCB. Lift, trimmed to what we use:
 
-We do **not** need their VMPL/SVSM-protocol layer, vTPM, or user-mode runtime.
+| need | coconut-svsm source |
+| --- | --- |
+| `#VC` IDT entry + dispatcher | `kernel/src/cpu/vc.rs` |
+| GHCB page setup, MSR proto | `kernel/src/sev/ghcb.rs`, `kernel/src/sev/msr_protocol.rs` |
+| `PVALIDATE` / page-state change | `kernel/src/sev/status.rs`, `kernel/src/mm/validate.rs` |
+| SNP `GUEST_REQUEST` (attestation report) | `kernel/src/greq/` |
+| IGVM packaging + measurement | `tools/igvmbuilder/`, `tools/igvmmeasure/` |
 
-## Boot artefact
+We need only the IOIO, CPUID and MSR `#VC` cases plus GUEST_REQUEST — a few
+hundred lines, not the full SVSM protocol layer.
 
-Build as an IGVM image so QEMU/KVM (and Hyper-V) can launch it directly with a
-deterministic launch measurement. `igvmmeasure` then gives the expected
-measurement that relying parties pin in policy when verifying the
-`fmt:"sev-snp"` attestation statement.
+Boot artefact becomes an IGVM file so the launch measurement is deterministic
+and matches what the relying party pins.
 
-## Randomness
+## Stage 3 — virtio-vsock
 
-`RDRAND`/`RDSEED` are available inside the guest and are covered by the SNP
-trust model. `Platform::random_bytes` maps to those directly.
+- Transport: virtio-mmio (single device, no PCI enumeration). The
+  `coconut-svsm/virtio-drivers/` crate already abstracts ring handling for a
+  `no_std` environment; depend on it directly.
+- Socket layer: implement `connect`-less listen on a fixed port, one stream,
+  `read_exact(64)`/`write_all(64)`. ~200 LoC on top of the ring driver.
+- `kmain()` becomes the obvious loop:
+  ```rust
+  let mut sock = vsock::accept(PORT);
+  loop {
+      sock.read_exact(&mut report)?;
+      for r in auth.process_report(&report) { sock.write_all(&r)?; }
+  }
+  ```
+  This is byte-identical to `sim`, so `bridge` needs no changes.
 
-## Persistence
+## Stage 4 — attestation in attStmt
 
-M2 is stateless (non-resident credentials only: the credential ID *is* the
-wrapped private key). Resident keys in M3 will need a sealed blob fed in via
-fw_cfg or virtio-blk, encrypted under a key released only after successful
-remote attestation — same pattern COCONUT-SVSM uses for vTPM NV state.
+Replace `fmt:"packed"` self-attestation with `fmt:"sev-snp"` (working name):
 
-## TDX
+```text
+attStmt = {
+  "alg": -7,
+  "sig": ecdsa(credKey, authData || clientDataHash),     // unchanged
+  "snp": SNP_ATTESTATION_REPORT,                         // report_data = sha512(credPubKey)
+  "x5c": [VCEK, ASK, ARK]                                // AMD chain
+}
+```
 
-TDX has no `#VC`; guest uses TDCALL/TDVMCALL instead. The GHCB layer becomes
-a thin trait with two backends. virtio-vsock and the `ctap` crate are
-unchanged. Attestation report shape differs (TDREPORT → Quote via QGS), so the
-`fmt:"sev-snp"` attStmt becomes `fmt:"tee"` with a discriminator.
+`ctap2::make_credential` already has the hook; only `cred.rs` grows a
+`snp_report(report_data: &[u8;64]) -> [u8;1184]` call.
+
+## Non-SEV development loop
+
+Stage 1 lets the whole vsock + CTAP path be exercised under plain QEMU
+(`-machine microvm`) with `vhost-vsock-device` long before SNP hardware is in
+the loop. Only stages 2/4 need an EPYC host.

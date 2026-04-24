@@ -6,7 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-sha2 = { version = "0.10", default-features = false }
+# `force-soft`: x86_64-unknown-none is soft-float / no-SSE; sha2's x86 SIMD
+# backend trips an LLVM legalizer ICE there. The enclave is single-threaded
+# and SHA-256 is not on a hot path, so the portable impl is fine.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 hmac = { version = "0.12", default-features = false }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 subtle = { version = "2", default-features = false }
