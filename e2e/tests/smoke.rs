@@ -56,10 +56,9 @@ fn libfido2_vmm_snp() {
         eprintln!("snp: VCEK signature ok");
     }
 
-    // Second launch: same binary ⇒ same measurement ⇒ same PSP-derived
-    // master key ⇒ the credential just minted still resolves. This is the
-    // operational property a relying party cares about, and it sidesteps
-    // having to reproduce KVM's VMSA byte-for-byte.
+    // Second launch: assert the measurement is byte-identical. That plus the
+    // PSP's deterministic KDF is the credential-persistence guarantee, and it
+    // sidesteps reproducing KVM's VMSA byte-for-byte.
     drop(be);
     let be = vmm_backend(true);
     let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");

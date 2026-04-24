@@ -1,7 +1,7 @@
 //! SNP guest↔PSP messaging (`SVM_VMGEXIT_GUEST_REQUEST`).
 //!
-//! The PSP injects a per-VMPCK AES-256-GCM key into the secrets page at
-//! launch; every request/response is wrapped with that key so the hypervisor
+//! The PSP injects VMPCK0..3 (AES-256-GCM keys) into the secrets page at
+//! launch; every request/response is wrapped with one so the hypervisor
 //! can forward but not read or forge. KVM handles the NAE event entirely
 //! in-kernel (`snp_handle_guest_req`: `kvm_read_guest` → PSP →
 //! `kvm_write_guest`), so the vmm sees nothing.
@@ -38,8 +38,9 @@ const KEY_FIELD_SELECT: u64 = (1 << 0) | (1 << 3);
 /// see the (already-encrypted) bytes via the memslot's userspace_addr.
 static mut REQ: Page = Page::ZERO;
 static mut RESP: Page = Page::ZERO;
-/// Response is copied here before any header check or decrypt — the host
-/// could otherwise race-modify it between check and use.
+/// Private staging: requests are built+encrypted here before copying to
+/// `REQ`, and responses are copied here from `RESP` before any header check
+/// or decrypt — keeps both directions out of the host's race window.
 static mut PRIV: Page = Page::ZERO;
 
 static mut VMPCK: [u8; 32] = [0; 32];
@@ -59,10 +60,8 @@ pub fn init() {
     sev::share(addr_of!(RESP) as u64, 4096);
 }
 
-/// One AES-GCM-wrapped round trip to the PSP.
-///
-/// On success the *decrypted* response payload sits at `&PRIV[HDR_LEN..]`;
-/// the caller knows its layout (status u32 + body).
+/// One AES-GCM-wrapped round trip to the PSP. On success the decrypted
+/// response payload sits at `&PRIV[HDR_LEN..]`; the caller knows its layout.
 fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
     let seq = unsafe { SEQNO };
     let cipher = Aes256Gcm::new(unsafe { &*addr_of!(VMPCK) }.into());

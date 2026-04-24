@@ -22,9 +22,7 @@ const KVM_SEV_SNP_LAUNCH_FINISH: u32 = 102;
 const SNP_PAGE_TYPE_NORMAL: u8 = 1;
 const SNP_PAGE_TYPE_SECRETS: u8 = 5;
 
-/// Fixed GPA for the secrets page; the guest reads VMPCK0 here. Kept below
-/// 1 MiB so it sits outside the loaded ELF but inside the guest's 4 KiB-
-/// granular page-table window.
+/// Fixed GPA for the secrets page; matches `enclave/src/greq.rs`.
 pub const SECRETS_GPA: u64 = 0x1000;
 
 /// Bit 17 must be set; bit 16 (SMT) must be set on SMT hosts or the PSP

@@ -13,9 +13,7 @@ pub struct BareMetal {
 impl BareMetal {
     pub fn new() -> Self {
         if sev::active() {
-            // PSP-derived key bound to (chip, measurement, policy) — same
-            // binary on same silicon ⇒ same key, so credentials survive
-            // restarts without any sealed-storage protocol.
+            // Survives restarts; see `greq::derived_key`.
             if let Some(master) = greq::derived_key() {
                 crate::serial::print("u2f-enclave: PSP-derived master key\n");
                 return Self { master, snp: true };
