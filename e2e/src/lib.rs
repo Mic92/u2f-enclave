@@ -136,7 +136,12 @@ fn find_hidraw() -> PathBuf {
                 .map(|s| s.contains("HID_NAME=u2f-enclave"))
                 .unwrap_or(false)
             {
-                return PathBuf::from("/dev").join(entry.file_name());
+                // Present is not the same as ready: wait for whoever sets
+                // permissions (udev rule, ad-hoc watcher) to catch up.
+                let dev = PathBuf::from("/dev").join(entry.file_name());
+                if fs::OpenOptions::new().write(true).open(&dev).is_ok() {
+                    return dev;
+                }
             }
         }
         if Instant::now() > deadline {
