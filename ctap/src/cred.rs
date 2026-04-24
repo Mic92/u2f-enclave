@@ -78,6 +78,7 @@ impl MasterKeys {
 
 pub struct NewCredential {
     pub id: [u8; CRED_ID_LEN],
+    pub sk: SigningKey,
     pub x: [u8; 32],
     pub y: [u8; 32],
 }
@@ -101,6 +102,7 @@ pub fn make<P: crate::Platform>(
         id,
         x: pk.x().unwrap()[..].try_into().unwrap(),
         y: pk.y().unwrap()[..].try_into().unwrap(),
+        sk,
     }
 }
 

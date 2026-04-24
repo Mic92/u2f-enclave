@@ -103,7 +103,7 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
         }
     }
 
-    let _cdh = client_data_hash.ok_or(status::ERR_MISSING_PARAMETER)?;
+    let cdh = client_data_hash.ok_or(status::ERR_MISSING_PARAMETER)?;
     let rp_id = rp_id.ok_or(status::ERR_MISSING_PARAMETER)?;
     if !have_user {
         return Err(status::ERR_MISSING_PARAMETER);
@@ -133,14 +133,24 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     ad.extend_from_slice(&c.id);
     ad.extend_from_slice(&cred::cose_es256_key(&c.x, &c.y));
 
+    // Self-attestation (WebAuthn §8.2, "packed" without x5c): sign
+    // authData || clientDataHash with the credential's own key. Gives RPs a
+    // verifiable statement today and is the slot the SNP report fills in M2.
+    let sig: p256::ecdsa::Signature = c.sk.sign(&[ad.as_slice(), &cdh].concat());
+    let sig = cred::der_ecdsa(&sig.to_bytes().into());
+
     let mut w = Writer::with_prefix(status::OK);
     w.map(3);
     w.unsigned(1);
-    w.text("none");
+    w.text("packed");
     w.unsigned(2);
     w.bytes(&ad);
     w.unsigned(3);
-    w.map(0);
+    w.map(2);
+    w.text("alg");
+    w.int(-7);
+    w.text("sig");
+    w.bytes(&sig);
     Ok(w.into_vec())
 }
 
@@ -407,7 +417,7 @@ mod tests {
         let mut rd = Reader::new(&resp[1..]);
         assert_eq!(rd.map().unwrap(), 3);
         assert_eq!(rd.unsigned().unwrap(), 1);
-        assert_eq!(rd.text().unwrap(), "none");
+        assert_eq!(rd.text().unwrap(), "packed");
         assert_eq!(rd.unsigned().unwrap(), 2);
         let ad = rd.bytes().unwrap();
 

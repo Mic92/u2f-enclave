@@ -24,6 +24,7 @@
               rustc
               rustfmt
               clippy
+              libfido2 # smoke-libfido2.sh
             ];
           };
         }
