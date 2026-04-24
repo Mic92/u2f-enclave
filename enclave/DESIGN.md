@@ -1,90 +1,137 @@
-# Enclave unikernel
+# Enclave design
 
-`x86_64-unknown-none` ELF: `ctap` + p256/sha2/hmac, heap, panic handler,
-RDRAND-backed `Platform`, PVH boot stub, paravirt SEV-SNP guest support,
-hand-rolled virtio-mmio + vsock. ~110 KB text+rodata; the ELF is 436 KB on
-disk because `.bss`/`.stack` sit in the PT_LOAD so SNP `LAUNCH_UPDATE`
-measures them. The host-side `vmm` crate embeds this ELF and is the only
-supported launcher.
+`x86_64-unknown-none` ELF that the `vmm` crate embeds and launches as a
+single-vCPU SEV-SNP guest. ~145 KB `.text`; the on-disk ELF is ~490 KB
+because `.bss`/`.stack` sit in PT_LOAD so they are part of the measured
+launch image.
 
-## Stage 1 — PVH boot — done
+## Threat model
 
-PVH ELF note + 32→64-bit trampoline (`ram32.s`) + linker script at 1 MiB.
-`vmm`'s hand-rolled KVM launcher places the vCPU directly in PVH initial
-state — no SeaBIOS/qboot in the path. Under SEV-SNP, KVM builds the VMSA
-from the same `KVM_SET_{REGS,SREGS}` at `LAUNCH_FINISH`, so the trampoline
-is shared verbatim; the only addition is OR-ing the C-bit (passed in
-`%esi`) into the 1 GiB leaf PTEs before enabling paging.
+The host kernel, KVM, the `vmm` process, vhost-vsock and everything on the
+vsock wire are the adversary. The AMD PSP firmware, CPU silicon (memory
+encryption, RMP, `RDRAND`, `PVALIDATE`) and the ARK/ASK/VCEK key chain are
+trusted. The goal is that a credential private key can only be exercised by
+code with this binary's launch measurement on genuine AMD silicon, and that
+a relying party can verify exactly that from the `makeCredential` response.
 
-## Stage 2 — SEV-SNP — done
+The host can deny service at will (drop vsock, refuse `VMGEXIT`, corrupt
+shared rings). The design accepts DoS; everything below argues why each
+host-reachable surface is DoS-only.
 
-**Paravirt, not `#VC`.** We own every privileged-instruction call site
-(serial, debug-exit, virtio-mmio), and the binary contains no
-`cpuid`/`rdtsc`/`wbinvd`, so instead of an IDT, exception-frame asm and an
-instruction decoder, those sites call the GHCB directly (`sev::outb`/`inb`/
-`outl`/`mmio_{read,write}32`). KVM forwards `SVM_EXIT_IOIO` and
-`SVM_VMGEXIT_MMIO_*` to its ordinary handlers, which surface as plain
-`KVM_EXIT_IO`/`KVM_EXIT_MMIO` — the vmm's emulation is identical for plain
-and encrypted guests.
+## No `#VC` handler
 
-`sev::init()` runs first thing in 64-bit Rust: refine page tables to 4 KiB
-for `[0, 2 MiB)`, `PVALIDATE`-rescind + MSR-protocol PSC + C-bit-clear the
-GHCB page, register its GPA. After that the boot path is the same as
-non-SEV. The vmm enables `KVM_CAP_EXIT_HYPERCALL` and answers
-`KVM_HC_MAP_GPA_RANGE` with `KVM_SET_MEMORY_ATTRIBUTES`; KVM does the
-RMPUPDATE.
+A conventional SEV-SNP guest takes `#VC` on `cpuid`/`rdtsc`/port-IO/MMIO
+and runs an instruction decoder to re-issue the access via the GHCB. This
+binary instead calls the GHCB directly at every privileged-instruction site
+— there are exactly three kinds (COM1, the debug-exit port, virtio-mmio
+registers) and we own all of them. RustCrypto on `target_os="none"`
+compiles to soft implementations with no `cpuid` feature probes (`objdump`
+shows zero `cpuid`/`rdtsc`/`wbinvd` in the ELF), so nothing else can
+trigger `#VC`. That removes the IDT, exception-frame asm, and instruction
+decoder from the TCB; `sev.rs` is ~300 LoC.
 
-Launch: `KVM_X86_SNP_VM` → `KVM_SEV_INIT2` → `guest_memfd` + memslot →
-`SNP_LAUNCH_{START,UPDATE,FINISH}`. The vmm computes the measurement input
-from the same `include_bytes!` ELF span, so IGVM is not needed.
+KVM forwards `SVM_EXIT_IOIO` and `SVM_VMGEXIT_MMIO_{READ,WRITE}` to its
+ordinary handlers, which surface to the `vmm` as plain `KVM_EXIT_IO` /
+`KVM_EXIT_MMIO`. The `vmm`'s emulation loop is therefore identical for
+plain-KVM and SNP guests.
 
-## Stage 3 — virtio-vsock — done
+## Memory layout
 
-Guest: hand-rolled modern virtio-mmio transport + split virtqueue +
-single-connection STREAM, polling. Under SNP, register accesses go through
-GHCB-MMIO and the whole `Vsock` instance (rings + buffers) is flipped to
-shared pages before `DRIVER_OK`; the host already controls every byte that
-flows through it, so sharing the bookkeeping fields too is DoS-only
-(indices are bounds-checked).
-
-Host: `vmm` emulates the virtio-mmio register window and offloads the
-virtqueues to `/dev/vhost-vsock`. vhost reads rings via the anon mmap
-that backs the shared half of the guest_memfd memslot, so no SNP-specific
-handling. The uhid bridge runs in-process. `e2e::libfido2_vmm{,_snp}` run
-the full `libfido2` register/attest/assert/verify against the single
-binary.
-
-## Stage 4 — attestation in attStmt — done
-
-`fmt` stays `"packed"` so stock libfido2 verifies the self-attestation;
-the SNP report rides alongside under an extra `"snp"` key it ignores:
-
-```text
-attStmt = {
-  "alg": -7,
-  "sig": ecdsa(credKey, authData || clientDataHash),     // self-attestation
-  "snp": SNP_ATTESTATION_REPORT,                         // report_data =
-}                                                        //   sha512(authData || cdh)
+```
+GPA 0x0000_1000   SECRETS page (PSP-injected, private)
+GPA 0x0010_0000   ELF PT_LOAD: .text .rodata .data .bss .stack (private)
+                    ├── GHCB page             ← flipped shared at runtime
+                    ├── greq REQ/RESP pages   ← flipped shared at runtime
+                    └── Vsock rings+buffers   ← flipped shared at runtime
+GPA 0xfeb0_0000   virtio-mmio register window (host-emulated, GHCB-MMIO)
 ```
 
-Guest: vmm injects a `SECRETS` page at `0x1000`; `greq.rs` reads VMPCK0,
-AES-256-GCM-wraps `MSG_REPORT_REQ`/`MSG_KEY_REQ`, and issues
-`SVM_VMGEXIT_GUEST_REQUEST` (handled entirely in-kernel by KVM). The
-derived key (`guest_field_select = policy|measurement`) is the master
-secret — same binary on same chip ⇒ credentials survive restarts.
+All RAM is identity-mapped (4×1 GiB leaves) so VA = GPA; `sev::init()`
+refines `[0, 2 MiB)` to 4 KiB so individual pages can have C=0. A page is
+made shared by `PVALIDATE`-rescind → MSR-protocol PSC → clear the C-bit;
+the `vmm` answers the resulting `KVM_HC_MAP_GPA_RANGE` with
+`KVM_SET_MEMORY_ATTRIBUTES` and KVM does the RMPUPDATE.
 
-Verifier (`e2e/src/snp.rs`): raw-hidraw CTAPHID client extracts the
-report, checks `report_data` binds `authData||cdh`, fetches the VCEK
-from AMD KDS by `(chip_id, reported_tcb)`, and verifies the P-384
-signature. A second launch asserts the measurement is stable.
+## Shared-page discipline
 
-Not yet: an offline tool that recomputes the expected measurement from
-the ELF + a VMSA template (à la `sev-snp-measure`). KVM's
-`sev_es_sync_vmsa` packs FPU/VMCB-save-area defaults that are kernel-
-version-specific, so this is its own small project.
+Anything in a shared page is host-writable at any instant.
 
-## Non-SEV development loop
+- **GHCB**: single static page. `ghcb_begin()` zeroes it and writes only the
+  fields the next exit needs; on return only the documented output fields
+  are read. No private state lives there between calls.
+- **Vsock instance** (rings + buffers + small bookkeeping): shared as one
+  block rather than carved up. Every byte that matters already transits the
+  host, and the bookkeeping fields a hostile host could poison are either
+  ring indices (bounds-checked → panic, not OOB) or overwritten in `init()`.
+- **greq REQ/RESP**: see below — plaintext never touches them.
 
-Stages 1+3 run on any KVM host: `cargo run -p vmm --release` exercises the
-full vsock + CTAP path. The encrypted launch and stage 4 need an EPYC host
-with SNP enabled.
+The heap and stack are private and disjoint from all of the above by
+construction (separate Rust statics / linker sections).
+
+## Boot
+
+PVH: the `vmm` programs the vCPU's `KVM_SET_{REGS,SREGS,CPUID2}` to PVH
+initial state and points `rip` at the 32-bit trampoline; under SNP, KVM's
+`LAUNCH_FINISH` builds the VMSA from those same registers, so one boot
+path serves both. The trampoline OR-s the C-bit (passed in `%esi`,
+host-queried — the guest can't `cpuid` for it before the GHCB is up) into
+the 1 GiB PTEs and jumps to 64-bit Rust. No firmware, no IGVM.
+
+## vsock
+
+Hand-rolled modern virtio-mmio transport + 8-entry split virtqueues,
+polling, single STREAM connection. The `vmm` emulates the register window
+and hands the virtqueues to `/dev/vhost-vsock`; vhost reads rings via the
+anonymous userspace mapping that backs the shared half of the guest_memfd
+memslot, so the SNP data path needs no special handling. CTAPHID frames are
+64 bytes and each goes in its own RW packet, so no stream reassembly.
+
+## PSP messaging (`greq.rs`)
+
+The `vmm` injects an `SNP_PAGE_TYPE_SECRETS` page at GPA `0x1000`; the PSP
+fills it with VMPCK0..3 at launch. `greq` reads VMPCK0, AES-256-GCM-wraps a
+request, and issues `SVM_VMGEXIT_GUEST_REQUEST`, which KVM handles entirely
+in-kernel (`kvm_read_guest` → PSP ring → `kvm_write_guest`).
+
+IV discipline is the security-critical part: requests are built and
+encrypted in a *private* staging page, and the sequence number is bumped
+*before* the ciphertext is copied to the shared request page. A host that
+fakes an error to force a retry never gets two ciphertexts under the same
+(key, IV); it gets a seqno desync, i.e. DoS. Responses are likewise copied
+to private memory before any header check or decrypt.
+
+## Attestation surface
+
+```text
+attStmt = { "alg": -7,
+            "sig": ecdsa(credKey, authData || clientDataHash),
+            "snp": SNP_ATTESTATION_REPORT }                // 1184 B
+report_data = sha512(authData || clientDataHash)
+```
+
+`fmt` stays `"packed"` so stock libfido2/WebAuthn accept the
+self-attestation; the report rides under an extra map key they ignore.
+`report_data` covers the same bytes the self-attestation signs, so the
+PSP's signature transitively binds the credential public key, RP ID and
+this registration's challenge to the launch measurement. An SNP-aware
+relying party (`e2e/src/snp.rs`) checks `report_data`, fetches the VCEK
+for `(chip_id, reported_tcb)` from AMD KDS, verifies the P-384 signature,
+and matches `measurement` against an allow-list.
+
+## Master secret
+
+`MSG_KEY_REQ` with `guest_field_select = policy|measurement` and the VCEK
+root: the PSP derives a 32-byte key from chip-unique material mixed with
+this binary's launch digest. Same binary on same silicon ⇒ same key, so
+credentials survive restarts with no sealed-storage protocol, no host-held
+blob, no network. A different binary (or a tampered host that alters the
+launch image) derives a different key and old credentials simply do not
+resolve — the persistence and the binding are the same mechanism.
+
+## Open: expected measurement
+
+A relying party currently learns the allowed measurement out-of-band (e.g.
+trust-on-first-use, asserted stable across launches by `e2e`). Computing it
+offline from the ELF requires reproducing KVM's VMSA (`sev_es_sync_vmsa`
+packs FPU/xsave/VMCB defaults that move between kernel versions); see
+`virtee/sev-snp-measure` for the shape of that tool. Tracked, not built.
