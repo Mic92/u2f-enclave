@@ -58,7 +58,7 @@ loaded with `sev_snp=Y`:
 ```console
 $ sudo setfacl -m u:$USER:rw /dev/sev
 $ u2f-enclave --snp &
-u2f-enclave: SEV-SNP launch ok (c-bit=51, 492 KiB measured)
+u2f-enclave: SEV-SNP launch ok (492 KiB measured)
 u2f-enclave: ready at /dev/hidraw3
 ```
 
@@ -70,7 +70,7 @@ same keys across restarts.
 ### For relying parties
 
 ```console
-$ u2f-enclave --measure 51
+$ u2f-enclave --measure
 70eabebbf79908ce762df385e22606ee97496e923305fd3fdff0f651309bf3dd463427edaa43dfa6092a1d365c6b6a8a
 ↑ expected SEV-SNP launch measurement for this build.
   An attStmt["snp"] report from `u2f-enclave --snp` carries this at
@@ -84,10 +84,10 @@ inputs:
   c-bit        51
 ```
 
-No AMD hardware required — run it in CI next to a reproducible build and
-you have the allow-list value. The hex digest goes to stdout alone, so
-`expected=$(u2f-enclave --measure 51)` works. The `51` is the SEV C-bit
-position (defaults to this host's; every shipping SNP CPU uses 51). See
+No AMD hardware required, no arguments — every input is fixed by the
+binary. Run it in CI next to a reproducible build and you have the
+allow-list value. The hex digest goes to stdout alone, so
+`expected=$(u2f-enclave --measure)` works. See
 [Attestation](#attestation-in-one-paragraph) below for the full check an
 RP performs.
 

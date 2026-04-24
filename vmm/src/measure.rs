@@ -5,12 +5,11 @@
 //! ELF alone, without an EPYC host. Algorithm per SNP firmware ABI §8.17.2;
 //! VMSA template per `arch/x86/kvm/svm/sev.c::sev_es_sync_vmsa` and verified
 //! byte-for-byte against `print_hex_dump_debug` output on a 6.18 kernel.
-//!
-//! The only host-dependent input is the C-bit position (passed to the guest
-//! in `%esi` and therefore part of the measured initial register state).
-//! Every shipping SEV-SNP part so far uses 51.
+//! Every input is fixed by this binary, so the digest is too.
 
 use sha2::{Digest, Sha384};
+
+use crate::snp::C_BIT;
 
 pub const VMSA_GPA: u64 = 0xFFFF_FFFF_F000;
 
@@ -25,7 +24,7 @@ const PAGE_TYPE_SECRETS: u8 = 5;
 /// `setup_pvh_cpu` is the source of truth for what we asked for; the values
 /// below are what KVM actually writes after its transforms. Keep the two in
 /// lock-step.
-pub fn vmsa_page(entry: u32, c_bit: u32) -> [u8; 4096] {
+pub fn vmsa_page(entry: u32) -> [u8; 4096] {
     let mut p = [0u8; 4096];
     // vmcb_seg = u16 selector, u16 attrib, u32 limit, u64 base.
     let seg = |p: &mut [u8; 4096], off: usize, sel: u16, attr: u16, lim: u32| {
@@ -59,7 +58,7 @@ pub fn vmsa_page(entry: u32, c_bit: u32) -> [u8; 4096] {
     q(&mut p, 0x170, 0x2); // rflags
     q(&mut p, 0x178, entry as u64); // rip
     q(&mut p, 0x268, 0x0007_0406_0007_0406); // g_pat: MSR_IA32_CR_PAT_DEFAULT
-    q(&mut p, 0x330, c_bit as u64); // rsi: see ram32.s
+    q(&mut p, 0x330, C_BIT as u64); // rsi: see ram32.s
     q(&mut p, 0x3b0, 0x1); // sev_features: SVM_SEV_FEAT_SNP_ACTIVE
     q(&mut p, 0x3e8, 0x1); // xcr0
     p[0x408..0x40c].copy_from_slice(&0x1f80u32.to_le_bytes()); // mxcsr

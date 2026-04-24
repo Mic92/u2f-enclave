@@ -130,13 +130,15 @@ resolve — the persistence and the binding are the same mechanism.
 
 ## Expected measurement
 
-`vmm --measure [c-bit]` recomputes the launch digest from the embedded ELF
+`u2f-enclave --measure` recomputes the launch digest from the embedded ELF
 without an EPYC host: it lays out PT_LOADs, runs the SNP `PAGE_INFO`
 SHA-384 chain over those pages, the SECRETS page metadata, and a VMSA
 template. The template mirrors what KVM's `sev_es_sync_vmsa` produces for
 our PVH register state (verified against a `dynamic_debug` hex-dump on a
-6.18 kernel). The only host-dependent input is the C-bit position, because
-it travels in `%esi`; every shipping SNP part uses 51.
-`e2e::libfido2_vmm_snp` asserts the predictor equals the PSP's measurement
+6.18 kernel). The C-bit position travels in `%esi` and is therefore part
+of the measured state; it is hard-coded to 51 (every shipping SNP part)
+so the digest is a pure function of the binary, and `Snp::init()` asserts
+the host agrees. `e2e::libfido2_vmm_snp` asserts the predictor equals the
+PSP's measurement
 on every run, so a kernel change to the VMSA construction shows up as a
 test failure rather than silent drift.

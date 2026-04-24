@@ -30,13 +30,11 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure [C_BIT]      print the expected SNP launch
+  u2f-enclave --measure              print the expected SNP launch
                                      measurement and exit (no /dev/kvm needed)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
-  C_BIT        SEV C-bit position (default: this host's; 51 on every
-               shipping SNP part)
 
 Needs rw access to /dev/kvm, /dev/uhid, /dev/vhost-vsock and (with --snp)
 /dev/sev. One-time setup:
@@ -50,7 +48,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     if args.next_if_eq("--measure").is_some() {
-        return print_measure(args.next());
+        return print_measure();
     }
     let snp = args.next_if_eq("--snp").is_some();
     let cid: u64 = match args.next().map(|s| s.parse()) {
@@ -142,8 +140,7 @@ fn main() -> io::Result<()> {
     let run_hdr = run as *mut kvm::RunHdr;
 
     kvm::passthrough_cpuid(&kvm, &vcpu)?;
-    let c_bit = if snp.is_some() { snp::host_c_bit() } else { 0 };
-    setup_pvh_cpu(&vcpu, img.entry, c_bit)?;
+    setup_pvh_cpu(&vcpu, img.entry, snp.is_some())?;
 
     if let Some(s) = &snp {
         s.launch(
@@ -153,7 +150,7 @@ fn main() -> io::Result<()> {
             img.hi - img.lo,
         )?;
         eprintln!(
-            "u2f-enclave: SEV-SNP launch ok (c-bit={c_bit}, {} KiB measured)",
+            "u2f-enclave: SEV-SNP launch ok ({} KiB measured)",
             (img.hi - img.lo) >> 10
         );
     }
@@ -281,18 +278,13 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
         })
 }
 
-/// Recompute the launch measurement from the embedded ELF and print it. The
-/// only environmental input is the C-bit position; default to the host's so
-/// `--measure` on the launching machine matches `--snp` on it. Hex goes to
-/// stdout alone so it composes (`m=$(u2f-enclave --measure)`); the
-/// human-readable context goes to stderr.
-fn print_measure(c_bit: Option<String>) -> io::Result<()> {
-    let c_bit: u32 = c_bit
-        .map(|s| s.parse().expect("--measure: C_BIT must be an integer"))
-        .unwrap_or_else(snp::host_c_bit);
+/// Recompute the launch measurement from the embedded ELF and print it.
+/// Hex to stdout so it composes (`m=$(u2f-enclave --measure)`); context to
+/// stderr. Host-independent: every input is fixed by this binary.
+fn print_measure() -> io::Result<()> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;
-    let vmsa = measure::vmsa_page(img.entry, c_bit);
+    let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
 
     let hex: String = ld.iter().map(|b| format!("{b:02x}")).collect();
@@ -308,7 +300,7 @@ fn print_measure(c_bit: Option<String>) -> io::Result<()> {
          secrets gpa  {:#x}\n  \
          vmsa gpa     {:#x}\n  \
          policy       {:#x}\n  \
-         c-bit        {c_bit}{}",
+         c-bit        {}",
         img.lo,
         img.hi,
         (img.hi - img.lo) >> 10,
@@ -317,13 +309,7 @@ fn print_measure(c_bit: Option<String>) -> io::Result<()> {
         snp::SECRETS_GPA,
         measure::VMSA_GPA,
         snp::SNP_POLICY,
-        // The C-bit is a high physical-address bit; anything below 32 means
-        // CPUID 0x8000_001f is absent and we read garbage.
-        if c_bit < 32 {
-            "  ← implausible; this host has no SEV CPUID leaf, pass C_BIT (51) explicitly"
-        } else {
-            ""
-        },
+        snp::C_BIT,
     );
     Ok(())
 }
@@ -331,7 +317,7 @@ fn print_measure(c_bit: Option<String>) -> io::Result<()> {
 /// PVH initial state per `xen/include/public/arch-x86/hvm/start_info.h`:
 /// flat 4 GiB segments, CR0.PE only, EBX = start_info (we pass 0; the guest
 /// ignores it).
-fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32, c_bit: u32) -> io::Result<()> {
+fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32, snp: bool) -> io::Result<()> {
     // GET first so reserved/KVM-populated fields (apic_base, tr) stay sane.
     let mut sr: kvm::Sregs = unsafe { std::mem::zeroed() };
     kvm::ioctl_ref(vcpu, kvm::KVM_GET_SREGS, &mut sr)?;
@@ -371,7 +357,7 @@ fn setup_pvh_cpu(vcpu: &impl AsRawFd, entry: u32, c_bit: u32) -> io::Result<()> 
         rip: entry as u64,
         rflags: 2,
         // ram32.s reads %esi: SEV C-bit position, 0 = plain VM.
-        rsi: c_bit as u64,
+        rsi: if snp { snp::C_BIT as u64 } else { 0 },
         ..Default::default()
     };
     kvm::ioctl_ref(vcpu, kvm::KVM_SET_REGS, &mut regs)

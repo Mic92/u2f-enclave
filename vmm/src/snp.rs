@@ -29,6 +29,13 @@ pub const SECRETS_GPA: u64 = 0x1000;
 /// rejects the launch (`SNP_POLICY_MASK_RSVD_MBO`/`_SMT`).
 pub const SNP_POLICY: u64 = (1 << 17) | (1 << 16);
 
+/// The C-bit position is part of the measured initial register state
+/// (we pass it to the guest in `%esi`). Hard-coding it makes the
+/// measurement host-independent; every shipping SNP part uses 51, and
+/// `init()` asserts the running host agrees so a hypothetical future
+/// part fails here instead of producing an unrecognised measurement.
+pub const C_BIT: u32 = 51;
+
 #[repr(C)]
 #[derive(Default)]
 struct SevCmd {
@@ -112,6 +119,13 @@ impl Snp {
             },
         )?;
         let sev = crate::open_dev("/dev/sev")?.into();
+
+        let host_c_bit = std::arch::x86_64::__cpuid(0x8000_001f).ebx & 0x3f;
+        if host_c_bit != C_BIT {
+            return Err(io::Error::other(format!(
+                "host SEV C-bit position is {host_c_bit}, but this build assumes {C_BIT}"
+            )));
+        }
 
         sev_op(vm, &sev, KVM_SEV_INIT2, &mut SevInit::default())?;
 
@@ -208,10 +222,4 @@ fn sev_op<T>(vm: &OwnedFd, sev: &OwnedFd, id: u32, data: &mut T) -> io::Result<(
             cmd.error
         ))
     })
-}
-
-/// CPUID 0x8000_001f EBX[5:0] on the host. The guest can't safely query this
-/// itself before the GHCB is up, so we pass it in as the boot hint.
-pub fn host_c_bit() -> u32 {
-    std::arch::x86_64::__cpuid(0x8000_001f).ebx & 0x3f
 }
