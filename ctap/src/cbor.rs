@@ -5,6 +5,7 @@
 //! library would be a large fraction of the TCB for functionality we never
 //! call, so we hand-roll the dozen header variants actually required.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------- encoder ---
@@ -21,9 +22,7 @@ impl Writer {
     /// Create a writer that already contains `prefix`. Convenient for CTAP2
     /// responses, which are `status_byte || cbor`.
     pub fn with_prefix(prefix: u8) -> Self {
-        let mut w = Self::new();
-        w.buf.push(prefix);
-        w
+        Self { buf: vec![prefix] }
     }
 
     fn header(&mut self, major: u8, n: u64) {

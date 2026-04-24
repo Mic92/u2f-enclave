@@ -177,10 +177,7 @@ fn get_assertion<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<Vec
     ad[..32].copy_from_slice(&rp_id_hash);
     ad[32] = 0x01; // flags: UP
 
-    let mut msg = Vec::with_capacity(37 + 32);
-    msg.extend_from_slice(&ad);
-    msg.extend_from_slice(&cdh);
-    let sig: p256::ecdsa::Signature = sk.sign(&msg);
+    let sig: p256::ecdsa::Signature = sk.sign(&[&ad[..], &cdh].concat());
     let der = cred::der_ecdsa(&sig.to_bytes().into());
 
     let mut w = Writer::with_prefix(status::OK);

@@ -105,9 +105,7 @@ pub fn make<P: crate::Platform>(
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().into()
+    Sha256::digest(data).into()
 }
 
 fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
