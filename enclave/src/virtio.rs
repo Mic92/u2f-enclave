@@ -2,10 +2,13 @@
 //!
 //! Only what a single-connection vsock needs: feature negotiation
 //! (VERSION_1), one split virtqueue per index, busy-poll for used buffers.
-//! No interrupts, no indirect descriptors, no event idx. Under SEV-SNP every
-//! MMIO access becomes a #VC anyway, so keeping this surface tiny matters.
+//! No interrupts, no indirect descriptors, no event idx. Under SEV-SNP each
+//! register access is a GHCB round trip, so keeping this surface tiny
+//! matters.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+
+use crate::sev;
 use core::sync::atomic::{compiler_fence, Ordering};
 
 /// Where `vmm` places the single virtio-mmio window (and where QEMU microvm
@@ -40,21 +43,26 @@ mod reg {
 }
 
 pub struct Mmio {
-    base: *mut u8,
+    base: u64,
 }
 
 impl Mmio {
-    /// SAFETY: `base` must point at a mapped virtio-mmio register window.
-    pub const unsafe fn new(base: usize) -> Self {
-        Self {
-            base: base as *mut u8,
-        }
+    pub const fn new(base: u64) -> Self {
+        Self { base }
     }
     fn r(&self, off: usize) -> u32 {
-        unsafe { read_volatile(self.base.add(off) as *const u32) }
+        if sev::active() {
+            sev::mmio_read32(self.base + off as u64)
+        } else {
+            unsafe { read_volatile((self.base as usize + off) as *const u32) }
+        }
     }
     fn w(&self, off: usize, v: u32) {
-        unsafe { write_volatile(self.base.add(off) as *mut u32, v) }
+        if sev::active() {
+            sev::mmio_write32(self.base + off as u64, v);
+        } else {
+            unsafe { write_volatile((self.base as usize + off) as *mut u32, v) };
+        }
     }
 
     pub fn probe(&self) -> Option<u32> {

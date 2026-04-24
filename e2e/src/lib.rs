@@ -203,15 +203,28 @@ pub fn sim_backend() -> Backend {
     }
 }
 
-pub fn vmm_backend() -> Backend {
+pub fn vmm_backend(snp: bool) -> Backend {
     let tmp = Tmp::new("vmm");
     let mut procs = Procs::default();
-    procs.spawn(Command::new(host_bin("vmm")).arg("42"));
+    let mut cmd = Command::new(host_bin("vmm"));
+    if snp {
+        cmd.arg("--snp");
+    }
+    procs.spawn(cmd.arg("42"));
     Backend {
         hidraw: find_hidraw(),
         procs,
         _tmp: tmp,
     }
+}
+
+/// Gate for SNP tests: PSP device is not enough, the kvm_amd module must
+/// actually have SNP enabled (BIOS / module-param can have it off).
+pub fn have_snp() -> bool {
+    need_writable("/dev/sev")
+        && fs::read_to_string("/sys/module/kvm_amd/parameters/sev_snp")
+            .map(|s| s.trim() == "Y")
+            .unwrap_or(false)
 }
 
 /// libfido2 register → verify-attestation → assert → verify-signature.

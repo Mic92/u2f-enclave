@@ -74,17 +74,13 @@ fn main() -> io::Result<()> {
 
     let img = elf::load(ENCLAVE, mem_slice)?;
 
-    // No vsock under SNP yet: virtqueue rings need shared pages and the
-    // guest's virtio-mmio accesses need the GHCB-MMIO path.
-    let mut vsock = if snp.is_some() {
-        None
-    } else {
-        match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
-            Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
-            Err(e) => {
-                eprintln!("vmm: vhost-vsock unavailable ({e}), continuing without");
-                None
-            }
+    // vhost reads rings/buffers via the anon mmap; under SNP that is exactly
+    // the shared half of the memslot, so no special handling.
+    let mut vsock = match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
+        Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
+        Err(e) => {
+            eprintln!("vmm: vhost-vsock unavailable ({e}), continuing without");
+            None
         }
     };
 

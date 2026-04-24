@@ -35,7 +35,9 @@ const GHCB_RAX: usize = 0x1f8;
 const GHCB_EXIT_CODE: usize = 0x390;
 const GHCB_EXIT_INFO1: usize = 0x398;
 const GHCB_EXIT_INFO2: usize = 0x3a0;
+const GHCB_SW_SCRATCH: usize = 0x3a8;
 const GHCB_BITMAP: usize = 0x3f0;
+const GHCB_SHARED_BUF: usize = 0x800;
 const GHCB_PROTO_VER: usize = 0xffa;
 const GHCB_USAGE: usize = 0xffc;
 
@@ -44,9 +46,9 @@ const IOIO_IN: u64 = 1;
 const IOIO_D8: u64 = 1 << 4;
 const IOIO_D32: u64 = 1 << 6;
 
-/// Anything ≤0x07 in reason-set 0 is a spec-defined failure, so pick a
-/// value that can't be mistaken for one.
-pub const TERM_BOOT_OK: u8 = 0x77;
+const SVM_VMGEXIT_MMIO_READ: u64 = 0x8000_0001;
+const SVM_VMGEXIT_MMIO_WRITE: u64 = 0x8000_0002;
+
 const TERM_FATAL: u8 = 0x7f;
 
 // --- shared state ---------------------------------------------------------
@@ -156,9 +158,6 @@ pub fn init(c_bit: u32) {
     flush_tlb();
 
     let gpa = addr_of!(GHCB) as u64;
-    if gpa >= 0x20_0000 {
-        die("GHCB above PT0's 2 MiB window");
-    }
     make_shared(gpa, c);
     unsafe { write_bytes(addr_of_mut!(GHCB) as *mut u8, 0, 4096) };
 
@@ -172,11 +171,27 @@ pub fn init(c_bit: u32) {
     unsafe { C_MASK = c };
 }
 
+/// Flip an identity-mapped, page-aligned range to shared. Anything the host
+/// must read or write (GHCB, virtqueue rings, DMA buffers) goes through
+/// here; everything else stays private.
+pub fn share(va: u64, bytes: usize) {
+    let c = unsafe { C_MASK };
+    debug_assert!(c != 0 && va & 0xfff == 0);
+    let mut p = va;
+    while p < va + bytes as u64 {
+        make_shared(p, c);
+        p += 4096;
+    }
+}
+
 /// Convert one identity-mapped 4 KiB page from private to shared:
 /// rescind validation, ask the hypervisor to RMPUPDATE it shared, then drop
 /// the C-bit. Order matters: touching the page between PVALIDATE and the
 /// PTE flip would `#VC` on validated=0.
 fn make_shared(gpa: u64, c: u64) {
+    if gpa >= 0x20_0000 {
+        die("shared page above PT0's 2 MiB window");
+    }
     if pvalidate(gpa, false) != 0 {
         die("PVALIDATE rescind");
     }
@@ -193,6 +208,9 @@ fn make_shared(gpa: u64, c: u64) {
 
 // --- GHCB-page protocol ---------------------------------------------------
 
+fn ghcb_ptr(off: usize) -> *mut u8 {
+    unsafe { (addr_of_mut!(GHCB) as *mut u8).add(off) }
+}
 fn ghcb_set(off: usize, v: u64) {
     unsafe {
         let p = (addr_of_mut!(GHCB) as *mut u8).add(off) as *mut u64;
@@ -209,29 +227,23 @@ fn ghcb_get(off: usize) -> u64 {
     }
 }
 
-fn ghcb_call(exit_code: u64, info1: u64, info2: u64, rax: u64) -> u64 {
+fn ghcb_begin(exit_code: u64, info1: u64, info2: u64) {
     // Clear bitmap + version/usage; the rest is don't-care.
     unsafe {
-        write_bytes((addr_of_mut!(GHCB) as *mut u8).add(GHCB_BITMAP), 0, 16);
-        write_volatile(
-            (addr_of_mut!(GHCB) as *mut u8).add(GHCB_PROTO_VER) as *mut u16,
-            2,
-        );
-        write_volatile(
-            (addr_of_mut!(GHCB) as *mut u8).add(GHCB_USAGE) as *mut u32,
-            0,
-        );
+        write_bytes(ghcb_ptr(GHCB_BITMAP), 0, 16);
+        write_volatile(ghcb_ptr(GHCB_PROTO_VER) as *mut u16, 2);
+        write_volatile(ghcb_ptr(GHCB_USAGE) as *mut u32, 0);
     }
-    ghcb_set(GHCB_RAX, rax);
     ghcb_set(GHCB_EXIT_CODE, exit_code);
     ghcb_set(GHCB_EXIT_INFO1, info1);
     ghcb_set(GHCB_EXIT_INFO2, info2);
+}
+fn ghcb_exit() {
     wrmsr(MSR_GHCB, addr_of!(GHCB) as u64);
     vmgexit();
     if ghcb_get(GHCB_EXIT_INFO1) & 0xffff_ffff != 0 {
         die("GHCB call rejected");
     }
-    ghcb_get(GHCB_RAX)
 }
 
 // --- paravirt port I/O ----------------------------------------------------
@@ -240,10 +252,12 @@ fn ghcb_call(exit_code: u64, info1: u64, info2: u64, rax: u64) -> u64 {
 // handler, which surfaces as plain `KVM_EXIT_IO` — the vmm's existing serial
 // / debug-exit emulation works unchanged.
 
-#[inline]
 fn ioio(port: u16, dbits: u64, is_in: bool, val: u64) -> u64 {
     let info1 = ((port as u64) << 16) | dbits | if is_in { IOIO_IN } else { 0 };
-    ghcb_call(SVM_EXIT_IOIO, info1, 0, val)
+    ghcb_begin(SVM_EXIT_IOIO, info1, 0);
+    ghcb_set(GHCB_RAX, val);
+    ghcb_exit();
+    ghcb_get(GHCB_RAX)
 }
 
 #[inline]
@@ -271,4 +285,28 @@ pub fn outl(port: u16, v: u32) {
     } else {
         unsafe { asm!("out dx, eax", in("dx") port, in("eax") v, options(nomem, nostack)) };
     }
+}
+
+// --- paravirt MMIO --------------------------------------------------------
+//
+// `SVM_VMGEXIT_MMIO_*` shuttle data via `sw_scratch` → GHCB `shared_buffer`;
+// KVM forwards to `kvm_sev_es_mmio_*` which surfaces as plain `KVM_EXIT_MMIO`,
+// so the vmm's virtio-mmio emulation is again unchanged.
+
+fn ghcb_scratch() -> u64 {
+    addr_of!(GHCB) as u64 + GHCB_SHARED_BUF as u64
+}
+
+pub fn mmio_read32(gpa: u64) -> u32 {
+    ghcb_begin(SVM_VMGEXIT_MMIO_READ, gpa, 4);
+    ghcb_set(GHCB_SW_SCRATCH, ghcb_scratch());
+    ghcb_exit();
+    unsafe { core::ptr::read_volatile(ghcb_ptr(GHCB_SHARED_BUF) as *const u32) }
+}
+
+pub fn mmio_write32(gpa: u64, v: u32) {
+    ghcb_begin(SVM_VMGEXIT_MMIO_WRITE, gpa, 4);
+    unsafe { write_volatile(ghcb_ptr(GHCB_SHARED_BUF) as *mut u32, v) };
+    ghcb_set(GHCB_SW_SCRATCH, ghcb_scratch());
+    ghcb_exit();
 }

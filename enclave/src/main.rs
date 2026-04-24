@@ -49,9 +49,6 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     serial::print("u2f-enclave: boot\n");
     if sev::active() {
         serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
-        // vsock under SNP is not wired yet (rings need shared pages and
-        // virtio-mmio needs the GHCB-MMIO path).
-        sev::terminate(sev::TERM_BOOT_OK);
     }
 
     let Some(vs) = vsock::init(VSOCK_PORT) else {
