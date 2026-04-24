@@ -1,8 +1,9 @@
 # Enclave unikernel
 
-The `ctap` crate links into a ~27 KB stripped `x86_64-unknown-none` ELF with a
-heap, panic handler and RDRAND-backed `Platform`. What remains is boot glue
-and two drivers. Everything below is additive on top of `src/main.rs`.
+~100 KB stripped `x86_64-unknown-none` ELF: `ctap` + p256/sha2/hmac, heap,
+panic handler, RDRAND-backed `Platform`, PVH boot stub, hand-rolled
+virtio-mmio + vsock. The host-side `vmm` crate embeds this ELF and is the
+only supported launcher. What remains is the SEV-SNP layer.
 
 ## Stage 1 — PVH boot — **done**
 
@@ -22,13 +23,13 @@ to the hypervisor via the GHCB. Lift, trimmed to what we use:
 | GHCB page setup, MSR proto | `kernel/src/sev/ghcb.rs`, `kernel/src/sev/msr_protocol.rs` |
 | `PVALIDATE` / page-state change | `kernel/src/sev/status.rs`, `kernel/src/mm/validate.rs` |
 | SNP `GUEST_REQUEST` (attestation report) | `kernel/src/greq/` |
-| IGVM packaging + measurement | `tools/igvmbuilder/`, `tools/igvmmeasure/` |
 
 We need only the IOIO, CPUID and MSR `#VC` cases plus GUEST_REQUEST — a few
 hundred lines, not the full SVSM protocol layer.
 
-Boot artefact becomes an IGVM file so the launch measurement is deterministic
-and matches what the relying party pins.
+The `vmm` issues the `KVM_SEV_*` launch ioctls itself and can compute the
+expected launch measurement from the same `include_bytes!` ELF, so IGVM is
+not required (it remains an option if QEMU/CH compatibility is wanted).
 
 ## Stage 3 — virtio-vsock — **done**
 
@@ -59,6 +60,6 @@ attStmt = {
 
 ## Non-SEV development loop
 
-Stage 1 lets the whole vsock + CTAP path be exercised under plain QEMU
-(`-machine microvm`) with `vhost-vsock-device` long before SNP hardware is in
-the loop. Only stages 2/4 need an EPYC host.
+Stages 1+3 run on any KVM host: `cargo run -p vmm --release` exercises the
+full vsock + CTAP path against the embedded guest. Only stages 2/4 need an
+EPYC host.

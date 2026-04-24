@@ -31,6 +31,7 @@ minimal TCB rather than a fork of an existing SVSM.
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. |
 | `vmm`    | std (Linux)       | The deployable: single binary that embeds the enclave ELF, launches it under KVM (no firmware), wires its virtqueues to `/dev/vhost-vsock`, and runs the uhid bridge in-process. `./vmm` → `/dev/hidrawN` FIDO2 device. SEV-SNP launch ioctls slot in here. |
 | `enclave`| `no_std`          | The unikernel: PVH-boots, hand-rolls virtio-vsock, serves CTAP. Cross-built and baked into `vmm` by `build.rs`. See `enclave/DESIGN.md`. |
+| `e2e`    | std               | Integration tests that drive `libfido2` and OpenSSH against `sim` and `vmm`. |
 
 ## Status / milestones
 
@@ -40,39 +41,32 @@ minimal TCB rather than a fork of an existing SVSM.
   Verified against two independent stacks: Yubico `libfido2` and OpenSSH
   `sk-ecdsa` keygen+login (`cargo test -p e2e`).
 - **M2 (in progress)** – bare-metal unikernel + own VMM. The ~100 KB
-  `x86_64-unknown-none` guest and a ~700-line KVM launcher with a
+  `x86_64-unknown-none` guest and a ~780-line KVM launcher with a
   vhost-vsock virtio-mmio backend are fused into one host binary;
   `e2e::libfido2_vmm` runs the full `libfido2` round-trip against it.
   Remaining: SEV-SNP `#VC`/GHCB in the guest and `KVM_SEV_*` launch in the
   host (needs an EPYC box).
 - **M3** – resident keys, `clientPIN`, TDX.
 
-## Try it (host simulation)
+## Try it
 
 ```bash
-# terminal 1: authenticator (defaults to $XDG_RUNTIME_DIR/u2f-enclave.sock)
-cargo run -p sim
+sudo setfacl -m u:$USER:rw /dev/uhid   # one-time
+cargo run -p vmm --release             # → /dev/hidrawN appears
+fido2-token -L                         # "u2f-enclave"
+ssh-keygen -t ecdsa-sk
+```
 
-# terminal 2: expose as /dev/hidrawN (needs rw on /dev/uhid)
-sudo setfacl -m u:$USER:rw /dev/uhid
+No-KVM dev path (sim+bridge over a Unix socket):
+
+```bash
+cargo run -p sim &
 cargo run -p bridge
-
-# terminal 3
-fido2-token -L          # should list "u2f-enclave"
 ```
 
-The full interop suite (libfido2 + OpenSSH against both `sim` and the
-bare-metal kernel under QEMU) is `cargo test -p e2e`. Tests that need
-`/dev/uhid` or `/dev/vhost-vsock` print `SKIP` and pass if those are not
-writable, so plain `cargo test` works everywhere.
-
-Same thing over AF_VSOCK (the transport the real enclave uses; CID 1 is the
-kernel loopback so no VM is needed):
-
-```bash
-cargo run -p sim -- vsock:5995 &
-cargo run -p bridge -- vsock:1:5995
-```
+`cargo test` runs the unit tests plus the e2e suite (libfido2 + OpenSSH
+against both `sim` and `vmm`). Tests that need `/dev/kvm`, `/dev/uhid` or
+`/dev/vhost-vsock` print `SKIP` and pass if those are not writable.
 
 ## References
 
