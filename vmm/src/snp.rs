@@ -20,6 +20,12 @@ const KVM_SEV_SNP_LAUNCH_UPDATE: u32 = 101;
 const KVM_SEV_SNP_LAUNCH_FINISH: u32 = 102;
 
 const SNP_PAGE_TYPE_NORMAL: u8 = 1;
+const SNP_PAGE_TYPE_SECRETS: u8 = 5;
+
+/// Fixed GPA for the secrets page; the guest reads VMPCK0 here. Kept below
+/// 1 MiB so it sits outside the loaded ELF but inside the guest's 4 KiB-
+/// granular page-table window.
+pub const SECRETS_GPA: u64 = 0x1000;
 
 /// Bit 17 must be set; bit 16 (SMT) must be set on SMT hosts or the PSP
 /// rejects the launch (`SNP_POLICY_MASK_RSVD_MBO`/`_SMT`).
@@ -164,18 +170,10 @@ impl Snp {
             },
         )?;
 
-        // KVM may process fewer pages than requested and hand back updated
-        // gfn_start/len/uaddr; loop until done.
-        let mut up = SnpLaunchUpdate {
-            gfn_start: gpa >> 12,
-            uaddr: uaddr as u64,
-            len,
-            type_: SNP_PAGE_TYPE_NORMAL,
-            ..Default::default()
-        };
-        while up.len > 0 {
-            sev_op(vm, &self.sev, KVM_SEV_SNP_LAUNCH_UPDATE, &mut up)?;
-        }
+        self.update(vm, uaddr, gpa, len, SNP_PAGE_TYPE_NORMAL)?;
+        // PSP overwrites this page with VMPCKs; the source bytes are
+        // irrelevant but a uaddr is still required.
+        self.update(vm, uaddr, SECRETS_GPA, 0x1000, SNP_PAGE_TYPE_SECRETS)?;
 
         sev_op(
             vm,
@@ -193,6 +191,24 @@ impl Snp {
                 pad1: [0; 4],
             },
         )?;
+        Ok(())
+    }
+}
+
+impl Snp {
+    fn update(&self, vm: &OwnedFd, uaddr: *const u8, gpa: u64, len: u64, ty: u8) -> io::Result<()> {
+        // KVM may process fewer pages than requested and hand back updated
+        // gfn_start/len/uaddr; loop until done.
+        let mut up = SnpLaunchUpdate {
+            gfn_start: gpa >> 12,
+            uaddr: uaddr as u64,
+            len,
+            type_: ty,
+            ..Default::default()
+        };
+        while up.len > 0 {
+            sev_op(vm, &self.sev, KVM_SEV_SNP_LAUNCH_UPDATE, &mut up)?;
+        }
         Ok(())
     }
 }

@@ -1,0 +1,174 @@
+//! SNP guest↔PSP messaging (`SVM_VMGEXIT_GUEST_REQUEST`).
+//!
+//! The PSP injects a per-VMPCK AES-256-GCM key into the secrets page at
+//! launch; every request/response is wrapped with that key so the hypervisor
+//! can forward but not read or forge. KVM handles the NAE event entirely
+//! in-kernel (`snp_handle_guest_req`: `kvm_read_guest` → PSP →
+//! `kvm_write_guest`), so the vmm sees nothing.
+//!
+//! Refs: SNP firmware ABI §7 (guest messages), §8.14 (secrets page); Linux
+//! `arch/x86/coco/sev/core.c::enc_payload`/`verify_and_dec_payload`.
+
+use core::ptr::{addr_of, addr_of_mut, read_volatile};
+
+use aes_gcm::aead::AeadInPlace;
+use aes_gcm::{Aes256Gcm, KeyInit};
+
+use crate::sev::{self, Page};
+
+/// Fixed GPA where the vmm injects `SNP_PAGE_TYPE_SECRETS`. Sits below 1 MiB
+/// (outside the loaded ELF) and inside the 2 MiB PT0 window.
+pub const SECRETS_GPA: u64 = 0x1000;
+const VMPCK0_OFF: usize = 32; // version,flags,fms,rsvd,gosvw[16] precede it
+
+const HDR_LEN: usize = 96;
+const AAD_OFF: usize = 48; // algo field; everything from here to HDR_LEN is AAD
+const AAD_LEN: usize = HDR_LEN - AAD_OFF;
+
+const MSG_KEY_REQ: u8 = 3;
+const MSG_REPORT_REQ: u8 = 5;
+
+pub const REPORT_LEN: usize = 1184;
+
+/// Mix `policy | measurement` into the derived key so it is bound to this
+/// exact binary on this exact policy. The VCEK root is already chip-unique.
+const KEY_FIELD_SELECT: u64 = (1 << 0) | (1 << 3);
+
+/// Request/response pages must be shared so KVM's `kvm_{read,write}_guest`
+/// see the (already-encrypted) bytes via the memslot's userspace_addr.
+static mut REQ: Page = Page::ZERO;
+static mut RESP: Page = Page::ZERO;
+/// Response is copied here before any header check or decrypt — the host
+/// could otherwise race-modify it between check and use.
+static mut PRIV: Page = Page::ZERO;
+
+static mut VMPCK: [u8; 32] = [0; 32];
+static mut SEQNO: u64 = 1;
+
+/// Read VMPCK0 out of the secrets page and flip the staging pages to shared.
+/// Must run after `sev::init` (PT0/C-bit are up) and before any heap use
+/// (the AES context lives on the stack).
+pub fn init() {
+    // The secrets page is private and PSP-validated at launch; a plain read
+    // through the C=1 mapping is correct.
+    let s = SECRETS_GPA as *const u8;
+    let vmpck = unsafe { &mut *addr_of_mut!(VMPCK) };
+    for (i, b) in vmpck.iter_mut().enumerate() {
+        *b = unsafe { read_volatile(s.add(VMPCK0_OFF + i)) };
+    }
+    sev::share(addr_of!(REQ) as u64, 4096);
+    sev::share(addr_of!(RESP) as u64, 4096);
+}
+
+/// One AES-GCM-wrapped round trip to the PSP.
+///
+/// On success the *decrypted* response payload sits at `&PRIV[HDR_LEN..]`;
+/// the caller knows its layout (status u32 + body).
+fn call(msg_type: u8, payload: &[u8]) -> Result<(), ()> {
+    let seq = unsafe { SEQNO };
+    let cipher = Aes256Gcm::new(unsafe { &*addr_of!(VMPCK) }.into());
+    let mut iv = [0u8; 12];
+    iv[..8].copy_from_slice(&seq.to_le_bytes());
+
+    // Build header + plaintext payload directly in the shared page; the
+    // host only ever sees the post-encryption state, and any tampering is
+    // caught by the PSP's GCM verify.
+    let req = unsafe { &mut (*addr_of_mut!(REQ)).0 };
+    req.fill(0);
+    req[32..40].copy_from_slice(&seq.to_le_bytes()); // msg_seqno
+    req[48] = 1; // algo = AES-256-GCM
+    req[49] = 1; // hdr_version
+    req[50..52].copy_from_slice(&(HDR_LEN as u16).to_le_bytes());
+    req[52] = msg_type;
+    req[53] = 1; // msg_version
+    req[54..56].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+    // 56..60 rsvd, 60 vmpck=0, 61..96 rsvd
+    req[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
+
+    // Stage AAD on the stack so the borrow checker lets us encrypt-in-place
+    // into the same page.
+    let mut aad = [0u8; AAD_LEN];
+    aad.copy_from_slice(&req[AAD_OFF..HDR_LEN]);
+    let tag = cipher
+        .encrypt_in_place_detached(
+            (&iv).into(),
+            &aad,
+            &mut req[HDR_LEN..HDR_LEN + payload.len()],
+        )
+        .map_err(|_| ())?;
+    req[..16].copy_from_slice(&tag);
+
+    let info2 = sev::guest_request(addr_of!(REQ) as u64, addr_of!(RESP) as u64);
+    if info2 != 0 {
+        // Low 32 = PSP firmware error; high 32 = VMM error (e.g. busy).
+        // Either is unrecoverable for our single-shot use.
+        return Err(());
+    }
+    // Once a response was produced the PSP has consumed (seq, seq+1); reuse
+    // would be rejected, so bump unconditionally even if we fail to decrypt.
+    unsafe { SEQNO += 2 };
+
+    // Copy out of shared memory before inspecting anything.
+    let priv_ = unsafe { &mut (*addr_of_mut!(PRIV)).0 };
+    let resp = unsafe { &(*addr_of!(RESP)).0 };
+    priv_.copy_from_slice(resp);
+
+    if u64::from_le_bytes(priv_[32..40].try_into().unwrap()) != seq + 1 || priv_[52] != msg_type + 1
+    {
+        return Err(());
+    }
+    let sz = u16::from_le_bytes([priv_[54], priv_[55]]) as usize;
+    if HDR_LEN + sz > 4096 {
+        return Err(());
+    }
+    let mut iv = [0u8; 12];
+    iv[..8].copy_from_slice(&priv_[32..40]);
+    let mut aad = [0u8; AAD_LEN];
+    aad.copy_from_slice(&priv_[AAD_OFF..HDR_LEN]);
+    let tag: [u8; 16] = priv_[..16].try_into().unwrap();
+    cipher
+        .decrypt_in_place_detached(
+            (&iv).into(),
+            &aad,
+            &mut priv_[HDR_LEN..HDR_LEN + sz],
+            &tag.into(),
+        )
+        .map_err(|_| ())?;
+
+    // Every response payload starts with a u32 status; non-zero = PSP refused
+    // the inner request (e.g. bad VMPL).
+    if u32::from_le_bytes(priv_[HDR_LEN..HDR_LEN + 4].try_into().unwrap()) != 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Hardware attestation: 1184-byte report whose `report_data` field is
+/// `user_data`, signed by the chip's VCEK.
+pub fn report(user_data: &[u8; 64]) -> Option<[u8; REPORT_LEN]> {
+    // MSG_REPORT_REQ = user_data[64] || vmpl u32 || rsvd[28]
+    let mut req = [0u8; 96];
+    req[..64].copy_from_slice(user_data);
+    call(MSG_REPORT_REQ, &req).ok()?;
+    // MSG_REPORT_RSP = status u32 || report_size u32 || rsvd[24] || report
+    let p = unsafe { &(*addr_of!(PRIV)).0 };
+    let mut out = [0u8; REPORT_LEN];
+    out.copy_from_slice(&p[HDR_LEN + 32..HDR_LEN + 32 + REPORT_LEN]);
+    Some(out)
+}
+
+/// 32-byte key the PSP derives from the chip's VCEK root mixed with this
+/// guest's launch measurement and policy. Same binary on same chip ⇒ same
+/// key across reboots; this is our master-secret persistence primitive.
+pub fn derived_key() -> Option<[u8; 32]> {
+    // MSG_KEY_REQ = root_key_select u32 || rsvd u32 || guest_field_select u64
+    //             || vmpl u32 || guest_svn u32 || tcb_version u64
+    let mut req = [0u8; 32];
+    req[8..16].copy_from_slice(&KEY_FIELD_SELECT.to_le_bytes());
+    call(MSG_KEY_REQ, &req).ok()?;
+    // MSG_KEY_RSP = status u32 || rsvd[28] || key[32]
+    let p = unsafe { &(*addr_of!(PRIV)).0 };
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&p[HDR_LEN + 32..HDR_LEN + 64]);
+    Some(out)
+}

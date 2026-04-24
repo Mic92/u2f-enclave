@@ -12,6 +12,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
+pub mod snp;
+
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// Tests share `/dev/uhid` (single device name) and the vsock CID, so they

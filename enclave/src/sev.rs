@@ -48,17 +48,21 @@ const IOIO_D32: u64 = 1 << 6;
 
 const SVM_VMGEXIT_MMIO_READ: u64 = 0x8000_0001;
 const SVM_VMGEXIT_MMIO_WRITE: u64 = 0x8000_0002;
+const SVM_VMGEXIT_GUEST_REQUEST: u64 = 0x8000_0011;
 
 const TERM_FATAL: u8 = 0x7f;
 
 // --- shared state ---------------------------------------------------------
 
 #[repr(C, align(4096))]
-struct Page([u8; 4096]);
+pub struct Page(pub [u8; 4096]);
+impl Page {
+    pub const ZERO: Self = Self([0; 4096]);
+}
 
 /// 0 ⇒ SEV inactive. Otherwise the C-bit mask for leaf PTEs.
 static mut C_MASK: u64 = 0;
-static mut GHCB: Page = Page([0; 4096]);
+static mut GHCB: Page = Page::ZERO;
 /// 4 KiB-granular tables for [0, 2 MiB) so individual pages (GHCB,
 /// virtqueue rings) can have C=0 while everything else stays private.
 static mut PD0: PageTable = PageTable([0; 512]);
@@ -300,4 +304,15 @@ pub fn mmio_write32(gpa: u64, v: u32) {
     unsafe { write_volatile(ghcb_ptr(GHCB_SHARED_BUF) as *mut u32, v) };
     ghcb_set(GHCB_SW_SCRATCH, ghcb_scratch());
     ghcb_exit();
+}
+
+// --- guest→PSP request ----------------------------------------------------
+
+/// `SNP_GUEST_REQUEST`: KVM copies `req_gpa` to the PSP and the PSP's reply
+/// to `resp_gpa`, both via the memslot's shared half. Returns `exit_info_2`
+/// (`fw_err` low 32, vmm err high 32; 0 = success).
+pub fn guest_request(req_gpa: u64, resp_gpa: u64) -> u64 {
+    ghcb_begin(SVM_VMGEXIT_GUEST_REQUEST, req_gpa, resp_gpa);
+    ghcb_exit();
+    ghcb_get(GHCB_EXIT_INFO2)
 }

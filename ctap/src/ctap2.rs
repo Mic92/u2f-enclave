@@ -6,6 +6,7 @@ use crate::{hid, Platform};
 use alloc::vec;
 use alloc::vec::Vec;
 use p256::ecdsa::signature::Signer;
+use sha2::{Digest, Sha512};
 
 // Command bytes (first byte of the CBOR request).
 pub const CMD_MAKE_CREDENTIAL: u8 = 0x01;
@@ -134,10 +135,14 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     ad.extend_from_slice(&cred::cose_es256_key(&c.x, &c.y));
 
     // Self-attestation (WebAuthn §8.2, "packed" without x5c): sign
-    // authData || clientDataHash with the credential's own key. Gives RPs a
-    // verifiable statement today and is the slot the SNP report fills in M2.
-    let sig: p256::ecdsa::Signature = c.sk.sign(&[ad.as_slice(), &cdh].concat());
+    // authData || clientDataHash with the credential's own key. Verifiable by
+    // any RP today; under SNP we additionally bind a hardware report to the
+    // same bytes.
+    let to_sign = [ad.as_slice(), &cdh].concat();
+    let sig: p256::ecdsa::Signature = c.sk.sign(&to_sign);
     let sig = cred::der_ecdsa(&sig.to_bytes().into());
+
+    let snp = ctx.platform.attestation(&Sha512::digest(&to_sign).into());
 
     let mut w = Writer::with_prefix(status::OK);
     w.map(3);
@@ -146,11 +151,18 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     w.unsigned(2);
     w.bytes(&ad);
     w.unsigned(3);
-    w.map(2);
+    // Stays `"packed"` so stock libfido2/WebAuthn verifiers accept the
+    // self-attestation; an SNP-aware verifier additionally checks the
+    // (spec-ignored) `"snp"` entry.
+    w.map(if snp.is_some() { 3 } else { 2 });
     w.text("alg");
     w.int(-7);
     w.text("sig");
     w.bytes(&sig);
+    if let Some(r) = snp {
+        w.text("snp");
+        w.bytes(&r);
+    }
     Ok(w.into_vec())
 }
 

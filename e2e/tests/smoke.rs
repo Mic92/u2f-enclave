@@ -21,6 +21,9 @@ fn libfido2_vmm() {
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
 /// GHCB, virtqueue rings PSC'd shared, vhost-vsock data path, uhid bridge,
 /// libfido2 register/assert/verify. No firmware, no `#VC` handler.
+///
+/// Then, acting as an SNP-aware relying party: pull the attestation report
+/// out of attStmt and check its `report_data` binds the credential.
 #[test]
 fn libfido2_vmm_snp() {
     let _g = serial_guard();
@@ -33,6 +36,21 @@ fn libfido2_vmm_snp() {
     }
     let be = vmm_backend(true);
     fido2_roundtrip(&be.hidraw);
+
+    let cdh = [0x11u8; 32];
+    let (ad, rep) = snp::make_credential(&be.hidraw, &cdh, "example.org");
+    let rep = snp::Report(&rep);
+    snp::check_binding(&ad, &cdh, &rep);
+    eprintln!(
+        "snp report: measurement={} chip_id={} tcb={:#x}",
+        hex(rep.measurement()),
+        hex(&rep.chip_id()[..8]),
+        rep.reported_tcb(),
+    );
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// `ssh-keygen -t ecdsa-sk` drives makeCredential; the login drives

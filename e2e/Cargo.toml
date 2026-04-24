@@ -6,3 +6,7 @@ publish = false
 
 [lib]
 # Helpers only; tests live in tests/.
+
+[dependencies]
+ctap = { path = "../ctap" }
+sha2 = "0.10"

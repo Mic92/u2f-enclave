@@ -16,6 +16,7 @@ use core::ptr::addr_of_mut;
 use linked_list_allocator::LockedHeap;
 
 mod boot;
+mod greq;
 mod platform;
 mod serial;
 mod sev;
@@ -39,6 +40,7 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
         // Brings up the GHCB; everything below is then identical for plain
         // and encrypted boots.
         sev::init(c_bit);
+        greq::init();
     }
 
     // SAFETY: single-threaded, runs once before any allocation.
