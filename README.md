@@ -88,8 +88,7 @@ No AMD hardware required, no arguments — every input is fixed by the
 binary. Run it in CI next to a reproducible build and you have the
 allow-list value. The hex digest goes to stdout alone, so
 `expected=$(u2f-enclave --measure)` works. See
-[Attestation](#attestation-in-one-paragraph) below for the full check an
-RP performs.
+[How attestation works](#how-attestation-works) for what to do with it.
 
 Run `u2f-enclave --help` for the rest.
 
@@ -107,23 +106,41 @@ Run `u2f-enclave --help` for the rest.
 No QEMU, no firmware, no IGVM, no `kvm-bindings`/`kvm-ioctls`, no SVSM
 protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
 
-## Attestation in one paragraph
+## How attestation works
 
-`makeCredential` returns `fmt:"packed"` self-attestation (so stock
-libfido2/WebAuthn verifiers accept it) with an extra `attStmt["snp"]`
-byte string: a 1184-byte SNP attestation report whose
-`report_data = SHA-512(authData ‖ clientDataHash)` — i.e. the same bytes the
-ES256 self-attestation signs. A relying party that knows about the `"snp"`
-key checks: report_data matches → P-384 signature verifies against the VCEK
-for `(chip_id, reported_tcb)` from AMD KDS → `measurement` is on the
-allow-list → done; the credential is bound to a genuine PSP-measured copy of
-this binary. The master secret is the PSP-**derived key** with
-`guest_field_select = policy|measurement`, so the same binary on the same
-silicon yields the same key and credentials survive restarts with no
-sealed-storage protocol. `vmm --measure` recomputes the expected digest
-offline (no EPYC needed) so the allow-list can be derived from source.
-`e2e::libfido2_vmm_snp` exercises every step — binding, VCEK signature,
-predictor-vs-PSP equality, and cross-launch `getAssertion`.
+The `makeCredential` response is standard WebAuthn `fmt:"packed"`
+self-attestation — any FIDO2 library accepts it as-is. It also carries one
+extra field, `attStmt["snp"]`: a 1184-byte report signed by the AMD chip's
+security processor. Libraries that don't know about it ignore it.
+
+A relying party that wants the hardware guarantee does three checks on
+that report:
+
+1. **Bound to this credential?** The report's `report_data` (bytes
+   `0x50..0x90`) must equal `SHA-512(authData ‖ clientDataHash)`. Those
+   are the exact bytes the credential's self-signature covers, so the
+   report can't have been lifted from some other registration.
+2. **Signed by real AMD silicon?** The report's `chip_id` and
+   `reported_tcb` name a public VCEK certificate on AMD's Key
+   Distribution Service. Fetch it (or cache it) and verify the report's
+   P-384 signature.
+3. **Running the code you audited?** The report's `measurement` (bytes
+   `0x90..0xc0`) must equal what `u2f-enclave --measure` prints for the
+   build you reviewed. That value is a pure function of the binary, so
+   you can compute it in CI without AMD hardware.
+
+If all three pass, the new credential's private key exists only inside
+an encrypted VM running this exact binary on a genuine AMD chip. There
+is no step four.
+
+**Why keys survive a restart:** the authenticator never stores its
+master secret. On every launch it asks the PSP to re-derive it from the
+chip's fused key and the launch measurement. Same binary on the same
+chip gives the same secret back; change either and old credentials just
+stop working. No sealed blobs, no host-side state, nothing to back up.
+
+`e2e/src/snp.rs` is a working reference implementation of all three
+checks (≈280 LoC, RustCrypto `p384` + a 4-line DER scan + `ureq`).
 
 ## Status
 
