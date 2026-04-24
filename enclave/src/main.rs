@@ -1,7 +1,7 @@
 //! Bare-metal authenticator kernel.
 //!
 //! PVH-boots, brings up a polling virtio-vsock, and serves CTAP HID reports
-//! over it. SEV-SNP (#VC, GHCB, attestation) is layered on top — see
+//! over it. SEV-SNP (paravirt GHCB, attestation) is layered on top — see
 //! `DESIGN.md`.
 //!
 //! Build: `cargo build -p enclave --target x86_64-unknown-none --release`

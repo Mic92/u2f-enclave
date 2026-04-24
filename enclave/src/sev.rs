@@ -118,20 +118,16 @@ fn msr_proto(req: u64) -> u64 {
     rdmsr(MSR_GHCB)
 }
 
-/// Never returns: KVM converts to `KVM_EXIT_SYSTEM_EVENT(SEV_TERM)` with
-/// `data[0]` = the raw GHCB MSR value.
-pub fn terminate(reason: u8) -> ! {
-    wrmsr(MSR_GHCB, GHCB_MSR_TERM_REQ | ((reason as u64) << 16));
+#[cold]
+fn die(_why: &str) -> ! {
+    // Can be reached before the GHCB is up (init/PSC failures), so serial
+    // is not safe; the MSR-protocol terminate is the one path that always
+    // works. KVM surfaces it as `KVM_EXIT_SYSTEM_EVENT(SEV_TERM)` with the
+    // raw GHCB MSR value, which is enough to bisect.
+    wrmsr(MSR_GHCB, GHCB_MSR_TERM_REQ | ((TERM_FATAL as u64) << 16));
     loop {
         vmgexit();
     }
-}
-
-#[cold]
-fn die(_why: &str) -> ! {
-    // No serial yet (that's what we're bringing up). The vmm prints the
-    // GHCB value, which is enough to bisect.
-    terminate(TERM_FATAL);
 }
 
 // --- bring-up -------------------------------------------------------------
@@ -213,18 +209,14 @@ fn ghcb_ptr(off: usize) -> *mut u8 {
 }
 fn ghcb_set(off: usize, v: u64) {
     unsafe {
-        let p = (addr_of_mut!(GHCB) as *mut u8).add(off) as *mut u64;
-        write_volatile(p, v);
+        write_volatile(ghcb_ptr(off) as *mut u64, v);
         // Mark field valid in the bitmap (index = byte-offset / 8).
         let bit = off / 8;
-        *(addr_of_mut!(GHCB) as *mut u8).add(GHCB_BITMAP + bit / 8) |= 1 << (bit & 7);
+        *ghcb_ptr(GHCB_BITMAP + bit / 8) |= 1 << (bit & 7);
     }
 }
 fn ghcb_get(off: usize) -> u64 {
-    unsafe {
-        let p = (addr_of!(GHCB) as *const u8).add(off) as *const u64;
-        core::ptr::read_volatile(p)
-    }
+    unsafe { core::ptr::read_volatile(ghcb_ptr(off) as *const u64) }
 }
 
 fn ghcb_begin(exit_code: u64, info1: u64, info2: u64) {
