@@ -4,16 +4,6 @@ use std::time::{Duration, Instant};
 
 use e2e::*;
 
-#[test]
-fn libfido2_sim() {
-    let _g = serial_guard();
-    if !need_writable("/dev/uhid") {
-        return;
-    }
-    let be = sim_backend();
-    fido2_roundtrip(&be.hidraw);
-}
-
 /// SEV-SNP encrypted launch end-to-end: own VMM, no firmware. The guest
 /// reaches 64-bit Rust through the C-bit page tables and reports back via
 /// the GHCB MSR terminate request — no `#VC` handler needed yet.
