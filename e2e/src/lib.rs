@@ -1,0 +1,280 @@
+//! Shared harness for the end-to-end smoke tests.
+//!
+//! These tests drive real external programs (qemu, libfido2, OpenSSH) against
+//! the workspace binaries, so they need `/dev/uhid` and `/dev/vhost-vsock`
+//! and cannot run in a sandboxed builder. Each test takes [`serial_guard`]
+//! because they all share one uhid device name and one vsock CID.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard, Once};
+use std::time::{Duration, Instant};
+
+pub const VSOCK_CID: u32 = 42;
+pub const VSOCK_PORT: u32 = 5555;
+
+static LOCK: Mutex<()> = Mutex::new(());
+
+/// Tests share `/dev/uhid` (single device name) and the vsock CID, so they
+/// must not overlap. Poison is ignored: one failing test should not cascade.
+pub fn serial_guard() -> MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn target_dir() -> PathBuf {
+    // Honour CARGO_TARGET_DIR so the harness finds the same artifacts cargo
+    // produced, regardless of where the test binary itself was placed.
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+}
+
+fn cargo(args: &[&str]) {
+    let st = Command::new(env!("CARGO"))
+        .args(args)
+        .current_dir(workspace_root())
+        .status()
+        .expect("spawn cargo");
+    assert!(st.success(), "cargo {args:?} failed");
+}
+
+pub fn host_bin(name: &str) -> PathBuf {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| cargo(&["build", "--release", "-p", "sim", "-p", "bridge"]));
+    target_dir().join("release").join(name)
+}
+
+pub fn enclave_elf() -> PathBuf {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        cargo(&[
+            "build",
+            "--release",
+            "-p",
+            "enclave",
+            "--target",
+            "x86_64-unknown-none",
+        ])
+    });
+    target_dir().join("x86_64-unknown-none/release/enclave")
+}
+
+/// Per-test scratch dir under `$XDG_RUNTIME_DIR`; removed on drop.
+pub struct Tmp(PathBuf);
+impl Tmp {
+    pub fn new(tag: &str) -> Self {
+        let base = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+        let p = PathBuf::from(base).join(format!("u2fe-e2e-{tag}"));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        let mut perm = fs::metadata(&p).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o700);
+        fs::set_permissions(&p, perm).unwrap();
+        Self(p)
+    }
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+    pub fn join(&self, s: &str) -> PathBuf {
+        self.0.join(s)
+    }
+}
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Return `true` if `path` is openable for writing, otherwise print a SKIP
+/// line. Tests early-return on `false` so `cargo test` still passes on
+/// machines without the device ACLs; grep output for `SKIP` to notice.
+pub fn need_writable(path: &str) -> bool {
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("SKIP: {path} not writable ({e}); see README for setfacl");
+            false
+        }
+    }
+}
+
+pub fn run(cmd: &mut Command) -> Output {
+    let out = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}"));
+    if !out.status.success() {
+        panic!(
+            "{:?} failed ({}):\nstdout: {}\nstderr: {}",
+            cmd,
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    out
+}
+
+pub fn which(bin: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .expect("PATH")
+        .to_string_lossy()
+        .split(':')
+        .map(|d| Path::new(d).join(bin))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("{bin} not in PATH"))
+}
+
+pub fn qboot_rom() -> PathBuf {
+    let qemu = fs::canonicalize(which("qemu-system-x86_64")).unwrap();
+    qemu.parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("share/qemu/qboot.rom"))
+        .filter(|p| p.is_file())
+        .expect("qboot.rom next to qemu")
+}
+
+fn find_hidraw() -> PathBuf {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for entry in fs::read_dir("/sys/class/hidraw")
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let uevent = entry.path().join("device/uevent");
+            if fs::read_to_string(&uevent)
+                .map(|s| s.contains("HID_NAME=u2f-enclave"))
+                .unwrap_or(false)
+            {
+                return PathBuf::from("/dev").join(entry.file_name());
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("hidraw device for u2f-enclave not found within 3s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// RAII handle over the authenticator backend (sim or qemu) plus the bridge.
+/// Children are SIGKILLed on drop so a panicking test does not leak them.
+pub struct Backend {
+    children: Vec<Child>,
+    pub hidraw: PathBuf,
+    _tmp: Tmp,
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        for c in self.children.iter_mut().rev() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        // Let udev tear the hidraw node down before the next test creates one.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn spawn_quiet(cmd: &mut Command) -> Child {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}"))
+}
+
+pub fn sim_backend() -> Backend {
+    let tmp = Tmp::new("sim");
+    let sock = tmp.join("ctap.sock");
+    let sim = spawn_quiet(Command::new(host_bin("sim")).arg(&sock));
+    std::thread::sleep(Duration::from_millis(200));
+    let bridge = spawn_quiet(Command::new(host_bin("bridge")).arg(&sock));
+    Backend {
+        hidraw: find_hidraw(),
+        children: vec![sim, bridge],
+        _tmp: tmp,
+    }
+}
+
+pub fn kernel_backend() -> Backend {
+    let tmp = Tmp::new("kern");
+    let elf = enclave_elf();
+    let qemu = spawn_quiet(
+        Command::new("qemu-system-x86_64")
+            .args(["-M", "microvm,pic=off,pit=off,rtc=off,ioapic2=off"])
+            .args(["-cpu", "max", "-m", "8M", "-nographic", "-no-reboot"])
+            .arg("-bios")
+            .arg(qboot_rom())
+            .args(["-global", "virtio-mmio.force-legacy=false"])
+            .args([
+                "-device",
+                &format!("vhost-vsock-device,guest-cid={VSOCK_CID}"),
+            ])
+            .arg("-kernel")
+            .arg(&elf),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let bridge = spawn_quiet(
+        Command::new(host_bin("bridge")).arg(format!("vsock:{VSOCK_CID}:{VSOCK_PORT}")),
+    );
+    Backend {
+        hidraw: find_hidraw(),
+        children: vec![qemu, bridge],
+        _tmp: tmp,
+    }
+}
+
+/// libfido2 register → verify-attestation → assert → verify-signature.
+/// Passing means our CTAPHID, CBOR, credential derivation and DER encoding
+/// are accepted by an independent implementation end to end.
+pub fn fido2_roundtrip(hidraw: &Path) {
+    let tmp = Tmp::new("fido2");
+    // Fixed challenge/user-id keep the test deterministic; randomness adds
+    // nothing here because the authenticator supplies its own nonces.
+    let chal = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let uid = "AQIDBAUGBwgJCgsMDQ4PEA==";
+
+    run(Command::new("fido2-token").arg("-I").arg(hidraw));
+
+    let cred_in = tmp.join("cred-in");
+    fs::write(&cred_in, format!("{chal}\nexample.org\nsmoke\n{uid}\n")).unwrap();
+    let cred_out = tmp.join("cred-out");
+    run(Command::new("fido2-cred")
+        .args(["-M", "-i"])
+        .arg(&cred_in)
+        .arg("-o")
+        .arg(&cred_out)
+        .arg(hidraw));
+    let cred_pk = tmp.join("cred-pk");
+    run(Command::new("fido2-cred")
+        .args(["-V", "-i"])
+        .arg(&cred_out)
+        .arg("-o")
+        .arg(&cred_pk));
+
+    let cred_out_s = fs::read_to_string(&cred_out).unwrap();
+    let cred_id = cred_out_s.lines().nth(4).expect("cred-out line 5");
+
+    let assert_in = tmp.join("assert-in");
+    fs::write(&assert_in, format!("{chal}\nexample.org\n{cred_id}\n")).unwrap();
+    let assert_out = tmp.join("assert-out");
+    run(Command::new("fido2-assert")
+        .args(["-G", "-i"])
+        .arg(&assert_in)
+        .arg("-o")
+        .arg(&assert_out)
+        .arg(hidraw));
+    run(Command::new("fido2-assert")
+        .args(["-V", "-i"])
+        .arg(&assert_out)
+        .arg(&cred_pk)
+        .arg("es256"));
+}

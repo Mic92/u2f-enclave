@@ -36,16 +36,13 @@ minimal TCB rather than a fork of an existing SVSM.
 - **M0** – CTAPHID transport, `CTAPHID_INIT`/`PING`/`WINK`, CTAP2 `getInfo`.
 - **M1** – `makeCredential` / `getAssertion` (ES256 via RustCrypto `p256`),
   stateless non-resident credentials, `fmt:"packed"` self-attestation.
-  Verified against two independent stacks: Yubico `libfido2`
-  (`scripts/smoke-libfido2.sh`) and OpenSSH `sk-ecdsa` keygen+login
-  (`scripts/smoke-ssh.sh`).
+  Verified against two independent stacks: Yubico `libfido2` and OpenSSH
+  `sk-ecdsa` keygen+login (`cargo test -p e2e`).
 - **M2 (in progress)** – bare-metal unikernel. PVH boot + hand-rolled
-  virtio-mmio/vsock done: `scripts/smoke-kernel.sh` runs the full `libfido2`
-  register/assert sequence against a ~100 KB `x86_64-unknown-none` ELF over
-  `vhost-vsock`. Remaining: SEV-SNP `#VC`/GHCB + attestation report
+  virtio-mmio/vsock done: the `e2e::libfido2_kernel` test runs the full
+  `libfido2` register/assert sequence against a ~100 KB `x86_64-unknown-none`
+  ELF over `vhost-vsock`. Remaining: SEV-SNP `#VC`/GHCB + attestation report
   (needs an EPYC host).
-- **M2** – SEV-SNP unikernel target, virtio-vsock, embed SNP attestation
-  report in a custom `fmt:"sev-snp"` attestation statement.
 - **M3** – resident keys, `clientPIN`, TDX.
 
 ## Try it (host simulation)
@@ -60,8 +57,12 @@ cargo run -p bridge
 
 # terminal 3
 fido2-token -L          # should list "u2f-enclave"
-scripts/smoke-libfido2.sh
 ```
+
+The full interop suite (libfido2 + OpenSSH against both `sim` and the
+bare-metal kernel under QEMU) is `cargo test -p e2e`. Tests that need
+`/dev/uhid` or `/dev/vhost-vsock` print `SKIP` and pass if those are not
+writable, so plain `cargo test` works everywhere.
 
 Same thing over AF_VSOCK (the transport the real enclave uses; CID 1 is the
 kernel loopback so no VM is needed):

@@ -7,9 +7,9 @@ and two drivers. Everything below is additive on top of `src/main.rs`.
 ## Stage 1 — boot under plain QEMU (no SEV) — **done**
 
 PVH ELF note + 32→64-bit trampoline (`ram32.s`) + linker script at 1 MiB +
-one 2 MiB identity page. `scripts/boot-enclave.sh` builds, boots under
-`qemu -kernel`, prints the banner, runs a CTAP report through the
-authenticator, and exits via `isa-debug-exit`. Pattern lifted from
+one 2 MiB identity page. `e2e::boot_pvh` builds, boots under
+`qemu -kernel`, checks the serial banner, and asserts the
+`isa-debug-exit` status. Pattern lifted from
 `cloud-hypervisor/rust-hypervisor-firmware`.
 
 ## Stage 2 — SEV-SNP enable
@@ -35,7 +35,7 @@ and matches what the relying party pins.
 
 Hand-rolled (no `virtio-drivers` dep): modern virtio-mmio transport + split
 virtqueue + single-connection vsock STREAM, polling, ~450 LoC total.
-`scripts/smoke-kernel.sh` boots under `qemu -M microvm` with
+`e2e::libfido2_kernel` boots under `qemu -M microvm` with
 `vhost-vsock-device`, `bridge` connects over AF_VSOCK, and the full
 `libfido2` register/attest/assert/verify sequence passes against the
 bare-metal kernel.

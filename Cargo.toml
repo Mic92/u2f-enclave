@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["ctap", "sim", "bridge", "enclave"]
+members = ["ctap", "sim", "bridge", "enclave", "e2e"]
 # enclave builds for x86_64-unknown-none only; keep it out of the default
 # host build so `cargo build` / `cargo test` stay one-command.
-default-members = ["ctap", "sim", "bridge"]
+default-members = ["ctap", "sim", "bridge", "e2e"]
 
 [workspace.package]
 edition = "2021"
