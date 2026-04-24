@@ -11,6 +11,11 @@ Open re-implementation of the idea behind *Hardware Authenticator Binding*
 (Shiraishi & Shinagawa, COMPSAC 2025), built from scratch to keep the
 trusted code small rather than forked from an existing firmware stack.
 
+> [!WARNING]
+> This is research code. It has **not** been independently audited.
+> Don't protect anything with it you aren't prepared to lose; use at
+> your own risk.
+
 ```
 ┌──────────── consumer VM ───────────┐      ┌──── authenticator CVM (SEV-SNP) ───┐
 │ browser → libfido2 → /dev/hidrawN  │      │                                    │
