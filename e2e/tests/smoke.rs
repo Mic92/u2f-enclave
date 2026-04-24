@@ -1,5 +1,6 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use e2e::*;
 
@@ -19,19 +20,46 @@ fn libfido2_sim() {
 #[test]
 fn snp_boot() {
     let _g = serial_guard();
-    if !need_writable("/dev/kvm") || !need_writable("/dev/sev") {
+    // `/dev/sev` existing isn't sufficient: SNP can be off in BIOS or via
+    // module param while the PSP device is still there.
+    if !need_writable("/dev/kvm")
+        || !need_writable("/dev/sev")
+        || fs::read_to_string("/sys/module/kvm_amd/parameters/sev_snp")
+            .map(|s| s.trim() != "Y")
+            .unwrap_or(true)
+    {
         return;
     }
-    let out = Command::new(host_bin("vmm"))
-        .arg("--snp")
-        .output()
-        .expect("spawn vmm");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Bounded wait: a wedged guest would otherwise hang the whole suite.
+    let mut procs = Procs::default();
+    let child = procs.push(
+        Command::new(host_bin("vmm"))
+            .arg("--snp")
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn vmm"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let st = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        assert!(Instant::now() < deadline, "snp guest did not terminate");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    use std::io::Read;
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .ok();
     // 0x77 = sev::TERM_BOOT_OK from the guest.
     assert!(
-        out.status.code() == Some(0x77) && stderr.contains("SEV-SNP launch ok"),
-        "status={:?}\nstderr: {stderr}",
-        out.status
+        st.code() == Some(0x77) && stderr.contains("SEV-SNP launch ok"),
+        "status={st:?}\nstderr: {stderr}"
     );
 }
 

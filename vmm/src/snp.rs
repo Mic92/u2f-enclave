@@ -82,8 +82,13 @@ struct SnpLaunchFinish {
 }
 
 pub struct Snp {
+    /// KVM stores this fd *number* at LAUNCH_START and reuses it for every
+    /// later PSP command (incl. runtime GUEST_REQUEST), so it must outlive
+    /// the launch.
     sev: OwnedFd,
-    gmem: OwnedFd,
+    /// Kernel takes its own ref at SET_USER_MEMORY_REGION2, but keeping it
+    /// open is the conservative choice and matches QEMU.
+    _gmem: OwnedFd,
 }
 
 impl Snp {
@@ -129,7 +134,7 @@ impl Snp {
         };
         ioctl_ref(vm, kvm::KVM_SET_MEMORY_ATTRIBUTES, &mut attrs)?;
 
-        Ok(Self { sev, gmem })
+        Ok(Self { sev, _gmem: gmem })
     }
 
     /// `LAUNCH_START` → encrypt+measure `[gpa, gpa+len)` from `uaddr` →
@@ -177,9 +182,6 @@ impl Snp {
                 pad1: [0; 4],
             },
         )?;
-
-        // Keep gmem fd alive for the VM's lifetime.
-        let _ = &self.gmem;
         Ok(())
     }
 }
@@ -202,17 +204,5 @@ fn sev_op<T>(vm: &OwnedFd, sev: &OwnedFd, id: u32, data: &mut T) -> io::Result<(
 /// CPUID 0x8000_001f EBX[5:0] on the host. The guest can't safely query this
 /// itself before `#VC` is up, so we pass it in as the boot hint.
 pub fn host_c_bit() -> u32 {
-    let ebx: u32;
-    unsafe {
-        std::arch::asm!(
-            "mov {tmp:r}, rbx",
-            "cpuid",
-            "xchg {tmp:r}, rbx",
-            tmp = out(reg) ebx,
-            inout("eax") 0x8000_001fu32 => _,
-            inout("ecx") 0u32 => _,
-            out("edx") _,
-        );
-    }
-    ebx & 0x3f
+    std::arch::x86_64::__cpuid(0x8000_001f).ebx & 0x3f
 }

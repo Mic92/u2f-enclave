@@ -157,14 +157,18 @@ fn find_hidraw() -> PathBuf {
 #[derive(Default)]
 pub struct Procs(Vec<Child>);
 impl Procs {
-    pub fn spawn(&mut self, cmd: &mut Command) {
-        self.0.push(
+    pub fn push(&mut self, c: Child) -> &mut Child {
+        self.0.push(c);
+        self.0.last_mut().unwrap()
+    }
+    pub fn spawn(&mut self, cmd: &mut Command) -> &mut Child {
+        self.push(
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}")),
-        );
+        )
     }
 }
 impl Drop for Procs {
