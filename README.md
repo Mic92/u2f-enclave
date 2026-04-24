@@ -29,7 +29,8 @@ minimal TCB rather than a fork of an existing SVSM.
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without SEV-SNP hardware. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. |
-| `enclave`| `no_std` (TODO)   | The actual unikernel: boots as an SNP guest, drives virtio-vsock, requests attestation reports. See `enclave/DESIGN.md`. |
+| `vmm`    | std (Linux)       | ~440-line KVM launcher: loads the enclave ELF, drops a vCPU into PVH state, emulates COM1. No firmware blob in the boot path. SEV-SNP launch ioctls and a vhost-vsock backend slot in here. |
+| `enclave`| `no_std`          | The actual unikernel: PVH-boots, hand-rolls virtio-vsock, serves CTAP. See `enclave/DESIGN.md`. |
 
 ## Status / milestones
 

@@ -48,7 +48,18 @@ fn cargo(args: &[&str]) {
 
 pub fn host_bin(name: &str) -> PathBuf {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| cargo(&["build", "--release", "-p", "sim", "-p", "bridge"]));
+    ONCE.call_once(|| {
+        cargo(&[
+            "build",
+            "--release",
+            "-p",
+            "sim",
+            "-p",
+            "bridge",
+            "-p",
+            "vmm",
+        ])
+    });
     target_dir().join("release").join(name)
 }
 

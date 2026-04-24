@@ -3,25 +3,22 @@ use std::process::Command;
 
 use e2e::*;
 
-/// PVH boot to 64-bit Rust on the plain `pc` machine. The only test that
-/// needs no host devices, so it is the baseline CI sanity check.
+/// PVH boot to 64-bit Rust under our own VMM — no QEMU, no C firmware.
+/// Exercises the hand-rolled ELF/PVH loader, KVM setup, and the enclave's
+/// boot path in one go; only needs `/dev/kvm`.
 #[test]
 fn boot_pvh() {
-    let elf = enclave_elf();
-    let out = Command::new("qemu-system-x86_64")
-        .arg("-kernel")
-        .arg(&elf)
-        .args(["-cpu", "max", "-m", "8M", "-nographic", "-no-reboot"])
-        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+    let out = Command::new(host_bin("vmm"))
+        .arg(enclave_elf())
         .output()
-        .expect("spawn qemu");
+        .expect("spawn vmm");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("u2f-enclave: no vsock, halt"),
-        "serial: {stdout}"
+        "serial: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    // isa-debug-exit: (code<<1)|1, qemu_exit(0) -> 1.
-    assert_eq!(out.status.code(), Some(1), "qemu status");
+    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]
