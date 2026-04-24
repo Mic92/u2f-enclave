@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The crate is the workspace's VMM; the binary is the project.
+[[bin]]
+name = "u2f-enclave"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2"
 bridge = { path = "../bridge" }

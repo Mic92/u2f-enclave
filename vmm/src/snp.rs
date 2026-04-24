@@ -111,12 +111,7 @@ impl Snp {
                 ..Default::default()
             },
         )?;
-        let sev = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/sev")
-            .map_err(|e| io::Error::other(format!("open /dev/sev: {e}")))?
-            .into();
+        let sev = crate::open_dev("/dev/sev")?.into();
 
         sev_op(vm, &sev, KVM_SEV_INIT2, &mut SevInit::default())?;
 

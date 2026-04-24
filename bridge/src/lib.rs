@@ -6,10 +6,12 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
 mod uhid;
 
 const REPORT_SIZE: usize = 64;
+const HID_NAME: &str = "u2f-enclave";
 
 /// Shuttle 64-byte reports between the authenticator stream and a freshly
 /// created uhid device. Spawns one thread for the inbound direction; never
@@ -19,8 +21,8 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let dev = uhid::Uhid::create("u2f-enclave")?;
-    eprintln!("bridge: /dev/uhid device created");
+    let dev = uhid::Uhid::create(HID_NAME)?;
+    eprintln!("u2f-enclave: ready at {}", find_hidraw());
 
     let mut dev_w = dev.try_clone()?;
     std::thread::spawn(move || {
@@ -53,5 +55,31 @@ where
             }
         };
         sock_w.write_all(&report)?;
+    }
+}
+
+/// uhid CREATE2 doesn't tell us which node the kernel allocated, so scan
+/// sysfs by name. The node appears asynchronously (kernel → udev), hence
+/// the short retry; falls back to a generic hint rather than blocking the
+/// bridge if it never shows.
+fn find_hidraw() -> String {
+    let needle = format!("HID_NAME={HID_NAME}");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        for e in std::fs::read_dir("/sys/class/hidraw")
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if std::fs::read_to_string(e.path().join("device/uevent"))
+                .is_ok_and(|s| s.contains(&needle))
+            {
+                return format!("/dev/{}", e.file_name().to_string_lossy());
+            }
+        }
+        if Instant::now() > deadline {
+            return "/dev/hidraw* (run `fido2-token -L`)".into();
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }

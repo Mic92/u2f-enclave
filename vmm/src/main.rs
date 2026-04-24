@@ -24,27 +24,60 @@ const DEBUG_EXIT: u16 = 0xf4;
 
 static ENCLAVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/enclave"));
 
+const USAGE: &str = "\
+FIDO2/CTAP2 authenticator running as a confidential VM.
+
+Usage:
+  u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
+                                     /dev/hidraw* device via uhid
+  u2f-enclave --measure [C_BIT]      print the expected SNP launch
+                                     measurement and exit (no /dev/kvm needed)
+
+  --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
+  GUEST_CID    AF_VSOCK context ID for the guest (default 42)
+  C_BIT        SEV C-bit position (default: this host's; 51 on every
+               shipping SNP part)
+
+Needs rw access to /dev/kvm, /dev/uhid, /dev/vhost-vsock and (with --snp)
+/dev/sev. One-time setup:
+  sudo setfacl -m u:$USER:rw /dev/kvm /dev/uhid /dev/vhost-vsock /dev/sev
+";
+
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return Ok(());
+    }
     if args.next_if_eq("--measure").is_some() {
         return print_measure(args.next());
     }
     let snp = args.next_if_eq("--snp").is_some();
-    let cid: u64 = args
-        .next()
-        .map(|s| s.parse().expect("usage: vmm [--snp] [guest-cid]"))
-        .unwrap_or(42);
+    let cid: u64 = match args.next().map(|s| s.parse()) {
+        None => 42,
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            eprint!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
 
-    let kvm = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/kvm")?;
+    let kvm = open_dev("/dev/kvm")?;
     let api = kvm::ioctl(&kvm, kvm::KVM_GET_API_VERSION, 0)?;
     if api != 12 {
         return Err(io::Error::other("KVM API != 12"));
     }
     let vm_type = if snp { kvm::KVM_X86_SNP_VM } else { 0 };
-    let vm = kvm::ioctl_fd(&kvm, kvm::KVM_CREATE_VM, vm_type)?;
+    let vm = kvm::ioctl_fd(&kvm, kvm::KVM_CREATE_VM, vm_type).map_err(|e| {
+        if snp {
+            io::Error::other(format!(
+                "KVM_CREATE_VM(SNP): {e} — needs an EPYC host with SEV-SNP \
+                 enabled in BIOS and kvm_amd loaded with sev_snp=Y"
+            ))
+        } else {
+            e
+        }
+    })?;
 
     let mem = unsafe {
         libc::mmap(
@@ -83,7 +116,10 @@ fn main() -> io::Result<()> {
     let mut vsock = match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
         Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
         Err(e) => {
-            eprintln!("vmm: vhost-vsock unavailable ({e}), continuing without");
+            eprintln!(
+                "u2f-enclave: vhost-vsock unavailable ({e}); continuing without \
+                 a HID device. Try: sudo setfacl -m u:$USER:rw /dev/vhost-vsock"
+            );
             None
         }
     };
@@ -117,7 +153,7 @@ fn main() -> io::Result<()> {
             img.hi - img.lo,
         )?;
         eprintln!(
-            "vmm: SEV-SNP launch ok (c-bit={c_bit}, {} KiB measured)",
+            "u2f-enclave: SEV-SNP launch ok (c-bit={c_bit}, {} KiB measured)",
             (img.hi - img.lo) >> 10
         );
     }
@@ -198,7 +234,7 @@ fn main() -> io::Result<()> {
                 if ev.type_ == kvm::SYSTEM_EVENT_SEV_TERM {
                     let ghcb = ev.data[0];
                     let reason = (ghcb >> 16) & 0xff;
-                    eprintln!("vmm: SEV terminate ghcb={ghcb:#x} reason={reason:#x}");
+                    eprintln!("u2f-enclave: SEV terminate ghcb={ghcb:#x} reason={reason:#x}");
                     std::process::exit(reason as i32);
                 }
                 return Err(io::Error::other(format!("system event {}", ev.type_)));
@@ -230,12 +266,27 @@ fn spawn_bridge(cid: u32) {
     });
 }
 
+/// Open a privileged device node with a hint at the fix on EACCES, since
+/// that's the failure mode every first-time user hits.
+pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(p)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("open {p}: {e} (try: sudo setfacl -m u:$USER:rw {p})"),
+            )
+        })
+}
+
 /// Recompute the launch measurement from the embedded ELF and print it. The
 /// only environmental input is the C-bit position; default to the host's so
 /// `vmm --measure` on the launching machine matches `vmm --snp` on it.
 fn print_measure(c_bit: Option<String>) -> io::Result<()> {
     let c_bit: u32 = c_bit
-        .map(|s| s.parse().expect("usage: vmm --measure [c-bit]"))
+        .map(|s| s.parse().expect("--measure: C_BIT must be an integer"))
         .unwrap_or_else(snp::host_c_bit);
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;

@@ -23,13 +23,72 @@ rather than as a fork of an existing SVSM.
                                             └────────────────────────────────────┘
 ```
 
+## Usage
+
+The whole project ships as a single ~800 KB Linux/x86_64 binary,
+`u2f-enclave`, with the guest image baked in. Running it makes a
+standard FIDO2 HID device appear; anything that speaks WebAuthn or CTAP2
+(browsers, `ssh-keygen -t ecdsa-sk`, `pam_u2f`, `fido2-token`) will pick
+it up like a USB key.
+
+```console
+$ # one-time: grant yourself the device nodes (or use a udev rule)
+$ sudo setfacl -m u:$USER:rw /dev/kvm /dev/uhid /dev/vhost-vsock
+
+$ u2f-enclave &
+u2f-enclave: ready at /dev/hidraw3
+
+$ fido2-token -L
+/dev/hidraw3: vendor=0x1209, product=0x000a (u2f-enclave)
+
+$ ssh-keygen -t ecdsa-sk
+Generating public/private ecdsa-sk key pair.
+...
+```
+
+Without `--snp` the guest runs as a plain KVM VM — functionally complete
+and fine for development, but the host kernel is in the trust boundary
+and keys do not survive a restart.
+
+### Hardware-bound mode (SEV-SNP)
+
+On an EPYC host (Milan or later) with SNP enabled in BIOS and `kvm_amd`
+loaded with `sev_snp=Y`:
+
+```console
+$ sudo setfacl -m u:$USER:rw /dev/sev
+$ u2f-enclave --snp &
+u2f-enclave: SEV-SNP launch ok (c-bit=51, 492 KiB measured)
+u2f-enclave: ready at /dev/hidraw3
+```
+
+Now the host cannot read the keys, every `makeCredential` carries a
+PSP-signed attestation report, and the master secret is derived by the
+PSP from this binary's launch measurement — same binary on same chip ⇒
+same keys across restarts.
+
+### For relying parties
+
+```console
+$ u2f-enclave --measure 51
+70eabebbf79908ce762df385e22606ee97496e923305fd3fdff0f651309bf3dd463427edaa43dfa6092a1d365c6b6a8a
+```
+
+prints the expected SNP launch measurement for this build (the `51` is
+the SEV C-bit position; every shipping SNP CPU uses 51). No AMD hardware
+required — run it in CI next to a reproducible build and you have the
+allow-list value to check `attStmt["snp"].measurement` against. See
+[Attestation](#attestation-in-one-paragraph) below for the full check.
+
+Run `u2f-enclave --help` for the rest.
+
 ## What's in the box
 
 | crate    | target            | purpose                                                            |
 | -------- | ----------------- | ------------------------------------------------------------------ |
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
 | `enclave`| `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `vmm` by `build.rs`. ~1.3 kLoC; see `enclave/DESIGN.md`. |
-| `vmm`    | std (Linux)       | The deployable: single binary that embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, and runs the uhid bridge in-process. ~1.1 kLoC. `./vmm [--snp]` → `/dev/hidrawN` FIDO2 device. |
+| `vmm`    | std (Linux)       | Builds the `u2f-enclave` binary: embeds the enclave ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process, and recomputes the launch measurement offline. ~1.2 kLoC. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `vmm` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2` and OpenSSH against `sim`/`vmm`; act as an SNP-aware relying party (raw-hidraw CTAPHID client, AMD KDS fetch, P-384 verify). |
@@ -66,34 +125,18 @@ predictor-vs-PSP equality, and cross-launch `getAssertion`.
   stable and offline-recomputable, master key persists.
 - **Next** – resident keys / `clientPIN`; TDX.
 
-## Try it
+## Building
 
 ```bash
-sudo setfacl -m u:$USER:rw /dev/uhid /dev/vhost-vsock
-cargo run -p vmm --release             # → /dev/hidrawN appears
-fido2-token -L                         # "u2f-enclave"
-ssh-keygen -t ecdsa-sk
+nix develop          # rust toolchain with x86_64-unknown-none + libfido2
+cargo build --release -p vmm     # → target/release/u2f-enclave
+cargo test                        # unit + e2e (libfido2, OpenSSH, SNP RP)
 ```
 
-On an EPYC host with SEV-SNP enabled in BIOS and `kvm_amd.sev_snp=Y`:
-
-```bash
-sudo setfacl -m u:$USER:rw /dev/sev
-cargo run -p vmm --release -- --snp
-```
-
-No-KVM dev path (sim+bridge over a Unix socket):
-
-```bash
-cargo run -p sim &
-cargo run -p bridge
-```
-
-`cargo test` runs the unit tests plus the e2e suite. Tests that need
-`/dev/kvm`, `/dev/uhid`, `/dev/vhost-vsock` or `/dev/sev` print `SKIP` and
-pass if those are not writable. The SNP attestation test soft-skips its
-signature check if AMD KDS is unreachable (cert is cached on disk after the
-first successful fetch).
+Tests that need `/dev/kvm`, `/dev/uhid`, `/dev/vhost-vsock` or `/dev/sev`
+print `SKIP` and pass if those are not writable; the SNP attestation test
+soft-skips its signature check if AMD KDS is unreachable (cert cached after
+first fetch). No-KVM dev loop: `cargo run -p sim & cargo run -p bridge`.
 
 ## References
 
