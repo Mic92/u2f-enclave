@@ -905,6 +905,7 @@ name = "vmm"
 version = "0.0.1"
 dependencies = [
  "bridge",
+ "ctap",
  "libc",
  "p384",
  "sha2",

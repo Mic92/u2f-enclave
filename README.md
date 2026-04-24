@@ -67,6 +67,29 @@ PSP-signed attestation report, and the master secret is derived by the
 PSP from this binary's launch measurement — same binary on same chip ⇒
 same keys across restarts.
 
+### See it work
+
+No browser needed — the binary can play both client and verifier:
+
+```console
+$ u2f-enclave attest | u2f-enclave verify
+attest: using /dev/hidraw3
+attest: report_data == SHA-512(authData||cdh)
+report_data   6f020c9e5d1731ca…
+measurement   70eabebbf79908ce…  ok
+policy        0x30000  ok
+chip_id       f59a25d8302ed76a
+reported_tcb  0x581b00000000000a
+vcek_sig      ok
+```
+
+`attest` registers a credential over hidraw, checks the report binds it
+(check 1), and writes the 1184-byte report to stdout. `verify` checks the
+VCEK signature (check 2) and the measurement against this build (check 3).
+See [How attestation works](#how-attestation-works) for what each check
+means and how a real relying party does the same from a browser
+registration.
+
 ### For relying parties
 
 ```console

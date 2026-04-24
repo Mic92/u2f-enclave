@@ -11,6 +11,7 @@
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 
+mod attest;
 mod elf;
 mod kvm;
 mod measure;
@@ -38,6 +39,11 @@ Usage:
                                      measurement matches this build; print
                                      report_data for the caller's binding
                                      check; exit 0 iff ok
+  u2f-enclave attest [DEVICE]        register a credential against the local
+                                     hidraw device, check report_data binds
+                                     it, write the report to stdout. Pipe
+                                     into `verify` for the full demo:
+                                       u2f-enclave attest | u2f-enclave verify
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
@@ -56,6 +62,9 @@ fn main() -> io::Result<()> {
     if args.peek().is_some_and(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
         return Ok(());
+    }
+    if args.next_if_eq("attest").is_some() {
+        std::process::exit(attest::cmd(args.next()));
     }
     if args.next_if_eq("verify").is_some() {
         let vcek = args.next_if_eq("--vcek").and_then(|_| args.next());

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 bridge = { path = "../bridge" }
+ctap = { path = "../ctap" }
 vsock = "0.5"
 sha2 = "0.10"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
