@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use crate::elf::RESET_GPA;
-use crate::kvm::{self, ioctl_fd, ioctl_ref, Cpuid2, NCPUID};
+use crate::kvm::{self, ioctl_ref, Cpuid2, NCPUID};
 
 const KVM_TDX_CAPABILITIES: u32 = 0;
 const KVM_TDX_INIT_VM: u32 = 1;
@@ -79,24 +79,7 @@ impl Tdx {
     pub fn init(vm: &OwnedFd, mem: *mut u8, mem_size: u64) -> io::Result<Self> {
         // `tdx_vcpu_create` insists on this; we never deliver interrupts
         // but the in-kernel LAPIC must exist.
-        ioctl_ref(
-            vm,
-            kvm::KVM_ENABLE_CAP,
-            &mut kvm::EnableCap {
-                cap: kvm::KVM_CAP_SPLIT_IRQCHIP,
-                ..Default::default()
-            },
-        )?;
-        // Same MapGPA → KVM_EXIT_HYPERCALL path as SEV-SNP's PSC.
-        ioctl_ref(
-            vm,
-            kvm::KVM_ENABLE_CAP,
-            &mut kvm::EnableCap {
-                cap: kvm::KVM_CAP_EXIT_HYPERCALL,
-                args: [1 << kvm::KVM_HC_MAP_GPA_RANGE, 0, 0, 0],
-                ..Default::default()
-            },
-        )?;
+        kvm::enable_cap(vm, kvm::KVM_CAP_SPLIT_IRQCHIP, 0)?;
 
         // KVM rejects INIT_VM if any cpuid entry isn't one the TDX module
         // can configure (`setup_tdparams_cpuids` insists copy_cnt==nent),
@@ -140,12 +123,7 @@ impl Tdx {
         });
         tdx_op(vm, KVM_TDX_INIT_VM, 0, &*init as *const _ as u64)?;
 
-        let gmem_size = mem_size + 0x1000;
-        let mut gm = kvm::CreateGuestMemfd {
-            size: gmem_size,
-            ..Default::default()
-        };
-        let gmem = ioctl_fd(vm, kvm::KVM_CREATE_GUEST_MEMFD, &mut gm as *mut _ as _)?;
+        let gmem = kvm::guest_memfd(vm, mem_size + 0x1000)?;
 
         let reset_mem = unsafe {
             libc::mmap(
@@ -161,35 +139,8 @@ impl Tdx {
             return Err(io::Error::last_os_error());
         }
 
-        for (slot, gpa, ua, sz, off) in [
-            (0, 0, mem as u64, mem_size, 0),
-            (1, RESET_GPA, reset_mem as u64, 0x1000, mem_size),
-        ] {
-            ioctl_ref(
-                vm,
-                kvm::KVM_SET_USER_MEMORY_REGION2,
-                &mut kvm::UserMemRegion2 {
-                    slot,
-                    flags: kvm::KVM_MEM_GUEST_MEMFD,
-                    guest_phys_addr: gpa,
-                    memory_size: sz,
-                    userspace_addr: ua,
-                    guest_memfd_offset: off,
-                    guest_memfd: gmem.as_raw_fd() as u32,
-                    ..Default::default()
-                },
-            )?;
-            ioctl_ref(
-                vm,
-                kvm::KVM_SET_MEMORY_ATTRIBUTES,
-                &mut kvm::MemAttrs {
-                    address: gpa,
-                    size: sz,
-                    attributes: kvm::KVM_MEMORY_ATTRIBUTE_PRIVATE,
-                    flags: 0,
-                },
-            )?;
-        }
+        kvm::private_slot(vm, 0, 0, mem as u64, mem_size, &gmem, 0)?;
+        kvm::private_slot(vm, 1, RESET_GPA, reset_mem as u64, 0x1000, &gmem, mem_size)?;
 
         Ok(Self {
             _gmem: gmem,

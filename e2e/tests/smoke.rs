@@ -1,7 +1,5 @@
 use std::fs;
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 use e2e::*;
 
@@ -16,45 +14,25 @@ fn libfido2_vmm() {
     {
         return;
     }
-    let be = vmm_backend(false);
+    let be = vmm_backend("");
     fido2_roundtrip(&be.hidraw);
 }
 
-/// TDX encrypted launch: reset stub at 4 GiB-16, ram32_tdx, paravirt port
-/// I/O via TDVMCALL. The guest halts after printing its banner.
+/// Full TDX path end to end: encrypted launch, ram32_tdx, virtio-mmio +
+/// MapGPA-shared rings via TDVMCALL, vhost-vsock, uhid bridge, libfido2
+/// register/assert/verify. No firmware, no `#VE` handler.
 #[test]
-fn tdx_boot() {
+fn libfido2_vmm_tdx() {
     let _g = serial_guard();
-    if !need_writable("/dev/kvm") || !have_tdx() {
+    if !need_writable("/dev/uhid")
+        || !need_writable("/dev/vhost-vsock")
+        || !need_writable("/dev/kvm")
+        || !have_tdx()
+    {
         return;
     }
-    let mut procs = Procs::default();
-    let child = procs.push(
-        Command::new(host_bin("u2f-enclave"))
-            .arg("--tdx")
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    // The pipe read blocks; bound the test by killing the child if it
-    // hasn't exited (the guest's debug_exit normally does).
-    let pid = child.id();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(20));
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-    });
-    let mut err = child.stderr.take().unwrap();
-    let mut out = String::new();
-    let mut buf = [0u8; 256];
-    while let Ok(n @ 1..) = err.read(&mut buf) {
-        out.push_str(&String::from_utf8_lossy(&buf[..n]));
-        eprint!("{}", String::from_utf8_lossy(&buf[..n]));
-        if out.contains("TDX active, paravirt up") {
-            return;
-        }
-    }
-    panic!("guest never printed TDX banner; output:\n{out}");
+    let be = vmm_backend("--tdx");
+    fido2_roundtrip(&be.hidraw);
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
@@ -73,7 +51,7 @@ fn libfido2_vmm_snp() {
     {
         return;
     }
-    let be = vmm_backend(true);
+    let be = vmm_backend("--snp");
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x11u8; 32];
@@ -124,7 +102,7 @@ fn libfido2_vmm_snp() {
     // PSP-derived master key is in fact stable.
     let m1 = rep[0x90..0xc0].to_vec();
     drop(be);
-    let be = vmm_backend(true);
+    let be = vmm_backend("--snp");
     let (_, rep2) = snp::make_credential(&be.hidraw, &cdh, "example.org");
     assert_eq!(
         &rep2[0x90..0xc0],

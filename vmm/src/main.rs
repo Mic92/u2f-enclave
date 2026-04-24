@@ -136,6 +136,16 @@ fn main() -> io::Result<()> {
     }
     let mem_slice = unsafe { std::slice::from_raw_parts_mut(mem as *mut u8, MEM_SIZE) };
 
+    if vm_type != 0 {
+        // Both SEV PSC and TDX MapGPA surface as KVM_HC_MAP_GPA_RANGE; the
+        // run loop's handler is shared.
+        kvm::enable_cap(
+            &vm,
+            kvm::KVM_CAP_EXIT_HYPERCALL,
+            1 << kvm::KVM_HC_MAP_GPA_RANGE,
+        )?;
+    }
+
     // SEV_INIT2 / KVM_TDX_INIT_VM must precede vCPU creation.
     let coco: Option<Box<dyn Coco>> = if snp {
         Some(Box::new(snp::Snp::init(
@@ -206,7 +216,7 @@ fn main() -> io::Result<()> {
         setup_pvh_cpu(&vcpu, img.entry, false)?;
     }
 
-    if vsock.is_some() && !tdx {
+    if vsock.is_some() {
         spawn_bridge(cid as u32);
     }
 

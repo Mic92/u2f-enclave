@@ -10,7 +10,10 @@
 //! `intel/tdx-module/src/common/data_structures/td_vmcs_init.c`.
 
 use core::arch::asm;
+use core::ptr::write_volatile;
 use core::sync::atomic::{compiler_fence, Ordering};
+
+use crate::boot;
 
 /// Set by `init`; both "is TDX" and the bit to OR into PTEs/GPAs to mark
 /// memory shared with the host (the inverse of SEV's C-bit).
@@ -28,8 +31,10 @@ const TDG_VP_VMCALL: u64 = 0;
 const EXIT_REASON_HLT: u64 = 12;
 const EXIT_REASON_IO_INSTRUCTION: u64 = 30;
 const EXIT_REASON_EPT_VIOLATION: u64 = 48;
-const _TDVMCALL_MAP_GPA: u64 = 0x10001;
+const TDVMCALL_MAP_GPA: u64 = 0x10001;
 const TDVMCALL_REPORT_FATAL_ERROR: u64 = 0x10003;
+
+const TDVMCALL_STATUS_RETRY: u64 = 1;
 
 /// Registers exposed to the VMM on TDVMCALL: r10..r15.
 const VMCALL_EXPOSE: u64 = 0xfc00;
@@ -69,7 +74,32 @@ fn tdvmcall(r11: u64, r12: u64, r13: u64, r14: u64, r15: u64) -> (u64, u64) {
 pub const SHARED_BIT: u32 = 47;
 
 pub fn init() {
+    boot::refine_low_2m(0);
     unsafe { SHARED_MASK = 1u64 << SHARED_BIT };
+}
+
+/// Flip an identity-mapped, page-aligned range to shared. Private contents
+/// are lost.
+pub fn share(va: u64, bytes: usize) {
+    let s = unsafe { SHARED_MASK };
+    debug_assert!(s != 0 && va & 0xfff == 0);
+    let end = va + bytes as u64;
+    let mut p = va | s;
+    loop {
+        let (st, next) = tdvmcall(TDVMCALL_MAP_GPA, p, (end | s) - p, 0, 0);
+        match st {
+            0 => break,
+            // r11 is the host's resume point; untrusted, so range-check.
+            TDVMCALL_STATUS_RETRY if (p..end | s).contains(&next) => p = next,
+            _ => die("MapGPA"),
+        }
+    }
+    let mut p = va;
+    while p < end {
+        unsafe { write_volatile(boot::pt0_entry(p), p | 0x03 | s) };
+        p += 4096;
+    }
+    boot::flush_tlb();
 }
 
 #[cold]
@@ -106,18 +136,27 @@ pub fn hlt() {
 
 // --- paravirt MMIO -------------------------------------------------------
 
+/// KVM's `tdx_emulate_mmio` rejects GPAs without the shared bit (private
+/// MMIO is meaningless), then strips it before `KVM_EXIT_MMIO`.
+#[inline]
+fn mmio(write: u64, gpa: u64, v: u64) -> u64 {
+    let (st, out) = tdvmcall(
+        EXIT_REASON_EPT_VIOLATION,
+        4,
+        write,
+        gpa | unsafe { SHARED_MASK },
+        v,
+    );
+    if st != 0 {
+        die("RequestMMIO");
+    }
+    out
+}
 #[inline]
 pub fn mmio_read32(gpa: u64) -> u32 {
-    let (st, v) = tdvmcall(EXIT_REASON_EPT_VIOLATION, 4, 0, gpa, 0);
-    if st != 0 {
-        die("RequestMMIO read");
-    }
-    v as u32
+    mmio(0, gpa, 0) as u32
 }
 #[inline]
 pub fn mmio_write32(gpa: u64, v: u32) {
-    let (st, _) = tdvmcall(EXIT_REASON_EPT_VIOLATION, 4, 1, gpa, v as u64);
-    if st != 0 {
-        die("RequestMMIO write");
-    }
+    mmio(1, gpa, v as u64);
 }

@@ -216,12 +216,12 @@ pub fn sim_backend() -> Backend {
     }
 }
 
-pub fn vmm_backend(snp: bool) -> Backend {
+pub fn vmm_backend(coco: &str) -> Backend {
     let tmp = Tmp::new("vmm");
     let mut procs = Procs::default();
     let mut cmd = Command::new(host_bin("u2f-enclave"));
-    if snp {
-        cmd.arg("--snp");
+    if !coco.is_empty() {
+        cmd.arg(coco);
     }
     procs.spawn(cmd.arg("42"));
     Backend {

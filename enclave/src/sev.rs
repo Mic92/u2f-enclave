@@ -14,7 +14,7 @@ use core::arch::asm;
 use core::ptr::{addr_of, addr_of_mut, write_bytes, write_volatile};
 use core::sync::atomic::{compiler_fence, Ordering};
 
-use crate::boot::{PageTable, PDPT};
+use crate::boot;
 
 // --- MSRs / GHCB MSR-protocol opcodes -------------------------------------
 
@@ -63,10 +63,6 @@ impl Page {
 /// 0 ⇒ SEV inactive. Otherwise the C-bit mask for leaf PTEs.
 static mut C_MASK: u64 = 0;
 static mut GHCB: Page = Page::ZERO;
-/// 4 KiB-granular tables for [0, 2 MiB) so individual pages (GHCB,
-/// virtqueue rings) can have C=0 while everything else stays private.
-static mut PD0: PageTable = PageTable([0; 512]);
-static mut PT0: PageTable = PageTable([0; 512]);
 
 #[inline(always)]
 pub fn active() -> bool {
@@ -98,10 +94,6 @@ fn vmgexit() {
     compiler_fence(Ordering::Release);
     unsafe { asm!("rep vmmcall", options(nostack)) };
     compiler_fence(Ordering::Acquire);
-}
-#[inline]
-fn flush_tlb() {
-    unsafe { asm!("mov {0}, cr3", "mov cr3, {0}", out(reg) _, options(nostack)) };
 }
 /// PVALIDATE: change the RMP `validated` bit. Runs at VMPL0, no hypervisor
 /// involvement.
@@ -141,21 +133,7 @@ fn die(_why: &str) -> ! {
 pub fn init(c_bit: u32) {
     let _ = rdmsr(MSR_SEV_STATUS); // #GP-triple-faults if vmm lied about SEV.
     let c = 1u64 << c_bit;
-
-    // Build PT0/PD0, then atomically swing PDPT[0] from its 1 GiB leaf to
-    // PD0. We are executing out of this range; the new leaf entries map the
-    // same PA with the same C-bit, so the CR3 reload is seamless.
-    let pt0 = unsafe { &mut *addr_of_mut!(PT0) };
-    let pd0 = unsafe { &mut *addr_of_mut!(PD0) };
-    for i in 0..512u64 {
-        pt0.0[i as usize] = (i << 12) | 0x03 | c;
-        pd0.0[i as usize] = (i << 21) | 0x83 | c;
-    }
-    pd0.0[0] = (addr_of!(PT0) as u64) | 0x03 | c;
-    unsafe {
-        write_volatile(addr_of_mut!(PDPT.0[0]), (addr_of!(PD0) as u64) | 0x03 | c);
-    }
-    flush_tlb();
+    boot::refine_low_2m(c);
 
     let gpa = addr_of!(GHCB) as u64;
     make_shared(gpa, c);
@@ -199,10 +177,10 @@ fn make_shared(gpa: u64, c: u64) {
         die("PSC shared");
     }
     unsafe {
-        let e = addr_of_mut!(PT0.0[(gpa >> 12) as usize]);
+        let e = boot::pt0_entry(gpa);
         write_volatile(e, *e & !c);
     }
-    flush_tlb();
+    boot::flush_tlb();
 }
 
 // --- GHCB-page protocol ---------------------------------------------------
@@ -257,29 +235,15 @@ fn ioio(port: u16, dbits: u64, is_in: bool, val: u64) -> u64 {
 
 #[inline]
 pub fn outb(port: u16, v: u8) {
-    if active() {
-        ioio(port, IOIO_D8, false, v as u64);
-    } else {
-        unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack)) };
-    }
+    ioio(port, IOIO_D8, false, v as u64);
 }
 #[inline]
 pub fn inb(port: u16) -> u8 {
-    if active() {
-        ioio(port, IOIO_D8, true, 0) as u8
-    } else {
-        let v: u8;
-        unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack)) };
-        v
-    }
+    ioio(port, IOIO_D8, true, 0) as u8
 }
 #[inline]
 pub fn outl(port: u16, v: u32) {
-    if active() {
-        ioio(port, IOIO_D32, false, v as u64);
-    } else {
-        unsafe { asm!("out dx, eax", in("dx") port, in("eax") v, options(nomem, nostack)) };
-    }
+    ioio(port, IOIO_D32, false, v as u64);
 }
 
 // --- paravirt MMIO --------------------------------------------------------

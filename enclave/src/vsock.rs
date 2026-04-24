@@ -13,7 +13,7 @@
 use core::mem::size_of;
 use core::ptr::{addr_of_mut, read_unaligned};
 
-use crate::sev;
+use crate::pv;
 use crate::virtio::{Mmio, Virtq, MMIO_BASE, Q};
 
 const DEVICE_ID_VSOCK: u32 = 19;
@@ -235,14 +235,12 @@ pub fn init(port: u32) -> Option<&'static mut Vsock> {
     if m.probe() != Some(DEVICE_ID_VSOCK) {
         return None;
     }
-    if sev::active() {
-        // Everything vhost touches must be a shared page. Rather than split
-        // rings/buffers from bookkeeping, share the whole struct: the host
-        // already controls every byte that flows through here, and the few
-        // private fields it could corrupt are bounds-checked indices or get
-        // overwritten by `init` below.
-        sev::share(addr_of_mut!(INSTANCE) as u64, size_of::<Vsock>());
-    }
+    // Everything vhost touches must be a shared page. Rather than split
+    // rings/buffers from bookkeeping, share the whole struct: the host
+    // already controls every byte that flows through here, and the few
+    // private fields it could corrupt are bounds-checked indices or get
+    // overwritten by `init` below.
+    pv::share(addr_of_mut!(INSTANCE) as u64, size_of::<Vsock>());
     let v = unsafe { &mut *addr_of_mut!(INSTANCE) };
     v.init(m, port);
     Some(v)

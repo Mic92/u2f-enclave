@@ -303,5 +303,69 @@ pub fn ioctl_fd(fd: &impl AsRawFd, req: libc::c_ulong, arg: libc::c_ulong) -> io
 }
 
 pub fn ioctl_ref<T>(fd: &impl AsRawFd, req: libc::c_ulong, arg: &mut T) -> io::Result<()> {
-    ioctl(fd, req, arg as *mut T as libc::c_ulong).map(|_| ())
+    ioctl(fd, req, arg as *mut T as _).map(|_| ())
+}
+
+// --- coco helpers ---------------------------------------------------------
+//
+// SNP and TDX share the guest_memfd / region2 / private-attribute setup;
+// only the vendor INIT/LAUNCH ioctls differ.
+
+pub fn enable_cap(vm: &impl AsRawFd, cap: u32, arg0: u64) -> io::Result<()> {
+    ioctl_ref(
+        vm,
+        KVM_ENABLE_CAP,
+        &mut EnableCap {
+            cap,
+            args: [arg0, 0, 0, 0],
+            ..Default::default()
+        },
+    )
+}
+
+pub fn guest_memfd(vm: &impl AsRawFd, size: u64) -> io::Result<OwnedFd> {
+    ioctl_fd(
+        vm,
+        KVM_CREATE_GUEST_MEMFD,
+        &mut CreateGuestMemfd {
+            size,
+            ..Default::default()
+        } as *mut _ as _,
+    )
+}
+
+/// Register a guest_memfd-backed slot and mark its whole range private.
+pub fn private_slot(
+    vm: &impl AsRawFd,
+    slot: u32,
+    gpa: u64,
+    ua: u64,
+    size: u64,
+    gmem: &OwnedFd,
+    off: u64,
+) -> io::Result<()> {
+    ioctl_ref(
+        vm,
+        KVM_SET_USER_MEMORY_REGION2,
+        &mut UserMemRegion2 {
+            slot,
+            flags: KVM_MEM_GUEST_MEMFD,
+            guest_phys_addr: gpa,
+            memory_size: size,
+            userspace_addr: ua,
+            guest_memfd_offset: off,
+            guest_memfd: gmem.as_raw_fd() as u32,
+            ..Default::default()
+        },
+    )?;
+    ioctl_ref(
+        vm,
+        KVM_SET_MEMORY_ATTRIBUTES,
+        &mut MemAttrs {
+            address: gpa,
+            size,
+            attributes: KVM_MEMORY_ATTRIBUTE_PRIVATE,
+            flags: 0,
+        },
+    )
 }

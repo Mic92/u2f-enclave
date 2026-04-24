@@ -11,7 +11,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use crate::kvm::{self, ioctl_fd, ioctl_ref};
+use crate::kvm::{self, ioctl_ref};
 
 // `enum sev_cmd_id`
 const KVM_SEV_INIT2: u32 = 22;
@@ -107,17 +107,6 @@ impl Snp {
     /// `KVM_SEV_INIT2` + `guest_memfd` + memslot. Must run before any vCPU
     /// is created.
     pub fn init(vm: &OwnedFd, mem: *mut u8, mem_size: u64) -> io::Result<Self> {
-        // Without this cap KVM rejects the guest's MSR-protocol PSC and
-        // the GHCB never comes up.
-        ioctl_ref(
-            vm,
-            kvm::KVM_ENABLE_CAP,
-            &mut kvm::EnableCap {
-                cap: kvm::KVM_CAP_EXIT_HYPERCALL,
-                args: [1 << kvm::KVM_HC_MAP_GPA_RANGE, 0, 0, 0],
-                ..Default::default()
-            },
-        )?;
         let sev = crate::open_dev("/dev/sev")?.into();
 
         let host_c_bit = std::arch::x86_64::__cpuid(0x8000_001f).ebx & 0x3f;
@@ -129,35 +118,8 @@ impl Snp {
 
         sev_op(vm, &sev, KVM_SEV_INIT2, &mut SevInit::default())?;
 
-        let mut gm = kvm::CreateGuestMemfd {
-            size: mem_size,
-            ..Default::default()
-        };
-        let gmem = ioctl_fd(
-            vm,
-            kvm::KVM_CREATE_GUEST_MEMFD,
-            &mut gm as *mut _ as libc::c_ulong,
-        )?;
-
-        let mut region = kvm::UserMemRegion2 {
-            slot: 0,
-            flags: kvm::KVM_MEM_GUEST_MEMFD,
-            guest_phys_addr: 0,
-            memory_size: mem_size,
-            userspace_addr: mem as u64,
-            guest_memfd_offset: 0,
-            guest_memfd: gmem.as_raw_fd() as u32,
-            ..Default::default()
-        };
-        ioctl_ref(vm, kvm::KVM_SET_USER_MEMORY_REGION2, &mut region)?;
-
-        let mut attrs = kvm::MemAttrs {
-            address: 0,
-            size: mem_size,
-            attributes: kvm::KVM_MEMORY_ATTRIBUTE_PRIVATE,
-            flags: 0,
-        };
-        ioctl_ref(vm, kvm::KVM_SET_MEMORY_ATTRIBUTES, &mut attrs)?;
+        let gmem = kvm::guest_memfd(vm, mem_size)?;
+        kvm::private_slot(vm, 0, 0, mem as u64, mem_size, &gmem, 0)?;
 
         Ok(Self { sev, _gmem: gmem })
     }
