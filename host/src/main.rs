@@ -16,6 +16,7 @@ mod elf;
 mod kvm;
 mod measure;
 mod mmio;
+mod sgx;
 mod snp;
 mod verify;
 mod vhost;
@@ -25,6 +26,7 @@ const COM1: u16 = 0x3f8;
 const DEBUG_EXIT: u16 = 0xf4;
 
 static GUEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest"));
+static SGX_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sgx"));
 
 const USAGE: &str = "\
 FIDO2/CTAP2 authenticator running as a confidential VM.
@@ -48,6 +50,8 @@ Usage:
                                      `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
+  --sgx        run inside an SGX enclave instead of a VM; requires
+               /dev/sgx_enclave (work in progress)
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
   --vcek FILE  VCEK certificate (DER). Without it, verify looks in
                $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
@@ -79,6 +83,9 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
         std::process::exit(verify::cmd(vcek, expected_measurement()?));
+    }
+    if args.next_if_eq("--sgx").is_some() {
+        return sgx::run(SGX_ELF);
     }
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();

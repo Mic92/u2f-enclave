@@ -50,7 +50,7 @@ rsync -az --delete --info=stats1 \
 "${SSH[@]}" "${U2FE_HOST}" "
   set -euo pipefail
   cd $(printf %q "${U2FE_DIR}")
-  for d in /dev/uhid /dev/vhost-vsock /dev/sev; do
+  for d in /dev/uhid /dev/vhost-vsock /dev/sev /dev/sgx_enclave; do
     [[ -e \$d ]] && sudo -n setfacl -m u:\$(id -un):rw \$d
   done
   sudo -n bash -c '

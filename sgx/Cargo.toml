@@ -1,0 +1,6 @@
+[package]
+name = "sgx"
+description = "Ring-3 SGX enclave that runs the ctap authenticator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
