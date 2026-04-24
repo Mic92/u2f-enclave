@@ -108,8 +108,9 @@ laptop$ echo $?
 ```
 
 Exit 0 means: a genuine AMD chip signed this, and what it measured
-matches what this binary would launch. `--measure` prints just the
-measurement hex if you'd rather hard-code it; `--help` lists everything.
+matches what this binary would launch. `--measure` prints the SNP and
+TDX measurement hex if you'd rather hard-code them; `--help` lists
+everything.
 
 ## How attestation works
 

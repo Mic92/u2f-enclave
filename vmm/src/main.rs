@@ -33,8 +33,8 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure              print this build's SNP launch
-                                     measurement and exit
+  u2f-enclave --measure              print this build's SNP and TDX launch
+                                     measurements and exit
   u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
                                      check its VCEK signature and that its
                                      measurement matches this build; print
@@ -363,31 +363,36 @@ fn expected_measurement() -> io::Result<[u8; 48]> {
     ))
 }
 
-/// Recompute the launch measurement from the embedded ELF: hex to stdout
-/// (so it composes), context to stderr.
+/// Recompute the launch measurements from the embedded ELF: labelled hex
+/// to stdout (so it composes with `grep`/`awk`), context to stderr.
 fn print_measure() -> io::Result<()> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
+    let mrtd = measure::mrtd(&mem, img.lo, img.hi, &img.reset);
 
-    println!("{}", verify::hex(&ld));
+    println!("snp  {}", verify::hex(&ld));
+    println!("tdx  {}", verify::hex(&mrtd));
     io::stdout().flush()?;
     eprintln!(
-        "↑ SEV-SNP launch measurement for this build.\n  \
-         An attStmt[\"snp\"] report from `u2f-enclave --snp` carries this at\n  \
-         bytes 0x90..0xc0; check it after verifying the VCEK signature.\n\
+        "↑ launch measurements for this build.\n  \
+         attStmt[\"snp\"] (1184 B) carries `snp` at 0x90..0xc0; check it\n    \
+           after verifying the VCEK signature.\n  \
+         attStmt[\"tdx\"] (1024 B) carries `tdx` at 0x210..0x240 (MRTD).\n\
          inputs:\n  \
          guest image  {:#x}..{:#x} ({} KiB, {} pages)\n  \
+         reset page   {:#x}\n  \
          entry        {:#x}\n  \
-         secrets gpa  {:#x}\n  \
-         vmsa gpa     {:#x}\n  \
-         c-bit        {}\n\
-         (also check report.policy == {:#x}; not part of this digest)",
+         secrets gpa  {:#x} (snp)\n  \
+         vmsa gpa     {:#x} (snp)\n  \
+         c-bit        {}    (snp)\n\
+         (snp: also check report.policy == {:#x}; not part of the digest)",
         img.lo,
         img.hi,
         (img.hi - img.lo) >> 10,
         (img.hi - img.lo) >> 12,
+        elf::RESET_GPA,
         img.entry,
         snp::SECRETS_GPA,
         measure::VMSA_GPA,

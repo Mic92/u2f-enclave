@@ -34,9 +34,8 @@ fn libfido2_vmm_tdx() {
     let be = vmm_backend("--tdx");
     fido2_roundtrip(&be.hidraw);
 
-    // attStmt["tdx"] = 1024-byte TDREPORT, with report_data binding this
-    // registration. The MAC is only locally verifiable, so this checks the
-    // binding and that MRTD is populated, not a signature.
+    // attStmt["tdx"] = 1024-byte TDREPORT. The MAC is only locally
+    // verifiable, so no signature check here — only the binding.
     let cdh = [0x22u8; 32];
     let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "tdx");
     assert_eq!(rep.len(), 1024);
@@ -44,8 +43,20 @@ fn libfido2_vmm_tdx() {
     let want_rd: [u8; 64] = sha2::Sha512::digest([ad.as_slice(), &cdh].concat()).into();
     assert_eq!(&rep[128..192], &want_rd[..], "report_data not bound");
     let mrtd: String = rep[528..576].iter().map(|b| format!("{b:02x}")).collect();
-    assert_ne!(rep[528..576], [0u8; 48]);
     eprintln!("MRTD  {mrtd}");
+
+    // Predictor == module: a TDX-module or KVM ordering change shows up
+    // as exit failure here, not silent drift.
+    let out = Command::new(host_bin("u2f-enclave"))
+        .arg("--measure")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let predicted = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("tdx  "))
+        .expect("--measure has no tdx line");
+    assert_eq!(mrtd, predicted, "offline MRTD != module MRTD");
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via

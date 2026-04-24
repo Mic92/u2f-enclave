@@ -1,11 +1,11 @@
-//! Offline SNP launch-measurement predictor.
+//! Offline launch-measurement predictors.
 //!
-//! Reproduces what the PSP computes during `SNP_LAUNCH_UPDATE`/`FINISH` so
-//! a relying party can derive the expected `report.measurement` from the
-//! ELF alone, without an EPYC host. Algorithm per SNP firmware ABI §8.17.2;
+//! Reproduce what the SNP firmware / TDX module hash over the launched
+//! pages so a relying party can derive the expected measurement from the
+//! ELF alone, on any machine. SNP per firmware ABI §8.17.2;
 //! VMSA template per `arch/x86/kvm/svm/sev.c::sev_es_sync_vmsa` and verified
 //! byte-for-byte against `print_hex_dump_debug` output on a 6.18 kernel.
-//! Every input is fixed by this binary, so the digest is too.
+//! Every input is fixed by this binary, so the digests are too.
 
 use sha2::{Digest, Sha384};
 
@@ -104,4 +104,32 @@ pub fn launch_digest(
     g.fold(PAGE_TYPE_SECRETS, secrets_gpa, [0u8; 48]);
     g.fold(PAGE_TYPE_VMSA, VMSA_GPA, Sha384::digest(vmsa).into());
     g.0
+}
+
+/// Compute MRTD as `Tdx::launch()` sequences it (low PT_LOAD pages then
+/// the reset page). `TDH.MNG.INIT` only `sha384_init()`s, so attributes/
+/// xfam/cpuid are not part of MRTD — they sit elsewhere in TDREPORT.
+pub fn mrtd(mem: &[u8], lo: u64, hi: u64, reset: &[u8; 4096]) -> [u8; 48] {
+    assert!(lo.is_multiple_of(4096) && hi.is_multiple_of(4096));
+    let mut h = Sha384::new();
+    let mut page = |gpa: u64, content: &[u8]| {
+        let mut blk = [0u8; 128];
+        blk[..12].copy_from_slice(b"MEM.PAGE.ADD");
+        blk[16..24].copy_from_slice(&gpa.to_le_bytes());
+        h.update(blk);
+        for off in (0..4096u64).step_by(256) {
+            let mut blk = [0u8; 128];
+            blk[..9].copy_from_slice(b"MR.EXTEND");
+            blk[16..24].copy_from_slice(&(gpa + off).to_le_bytes());
+            h.update(blk);
+            h.update(&content[off as usize..off as usize + 256]);
+        }
+    };
+    let mut gpa = lo;
+    while gpa < hi {
+        page(gpa, &mem[gpa as usize..gpa as usize + 4096]);
+        gpa += 4096;
+    }
+    page(crate::elf::RESET_GPA, reset);
+    h.finalize().into()
 }

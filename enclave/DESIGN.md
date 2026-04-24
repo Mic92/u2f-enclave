@@ -130,15 +130,21 @@ resolve — the persistence and the binding are the same mechanism.
 
 ## Computing the measurement offline
 
-`u2f-enclave --measure` recomputes the launch digest from the embedded ELF
-without an EPYC host: it lays out PT_LOADs, runs the SNP `PAGE_INFO`
-SHA-384 chain over those pages, the SECRETS page metadata, and a VMSA
-template. The template mirrors what KVM's `sev_es_sync_vmsa` produces for
-our PVH register state (verified against a `dynamic_debug` hex-dump on a
-6.18 kernel). The C-bit position travels in `%esi` and is therefore part
-of the measured state; it is hard-coded to 51 (every shipping SNP part)
-so the result is a pure function of the binary, and `Snp::init()` asserts
-the host agrees.
+`u2f-enclave --measure` recomputes both launch digests from the embedded
+ELF on any machine.
+
+For SNP it lays out PT_LOADs, runs the `PAGE_INFO` SHA-384 chain over
+those pages, the SECRETS page metadata, and a VMSA template that mirrors
+what KVM's `sev_es_sync_vmsa` produces for our PVH register state
+(verified against a `dynamic_debug` hex-dump on a 6.18 kernel). The C-bit
+position travels in `%esi` and is therefore part of the measured state; it
+is hard-coded to 51 (every shipping SNP part) so the result is a function
+of the binary alone, and `Snp::init()` asserts the host agrees.
+
+For TDX it runs the `MEM.PAGE.ADD`/`MR.EXTEND` SHA-384 stream over the
+same PT_LOAD pages plus the reset page, in the exact order `Tdx::launch`
+issues them. `TDH.MNG.INIT` does not feed TD parameters into MRTD, so the
+result depends on the page contents and addresses only.
 
 If the computation is wrong, `verify` rejects valid reports; it can't
 accept an invalid one because the PSP only signs what it actually
