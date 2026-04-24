@@ -21,8 +21,7 @@ fn libfido2_vmm() {
 }
 
 /// TDX encrypted launch: reset stub at 4 GiB-16, ram32_tdx, paravirt port
-/// I/O via TDVMCALL. The guest halts after printing its banner; vsock comes
-/// in the next commit.
+/// I/O via TDVMCALL. The guest halts after printing its banner.
 #[test]
 fn tdx_boot() {
     let _g = serial_guard();
@@ -38,8 +37,8 @@ fn tdx_boot() {
             .spawn()
             .unwrap(),
     );
-    // The pipe read below blocks; bound the test by killing the child if
-    // it has not exited on its own (which the guest's debug_exit does).
+    // The pipe read blocks; bound the test by killing the child if it
+    // hasn't exited (the guest's debug_exit normally does).
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));

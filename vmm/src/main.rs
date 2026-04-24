@@ -389,7 +389,7 @@ fn print_measure() -> io::Result<()> {
 
 use std::os::fd::{OwnedFd, RawFd};
 
-/// Per-vendor encrypted+measured launch. Lets `main` stay vendor-agnostic.
+/// Per-vendor encrypted+measured launch.
 trait Coco {
     fn launch(
         &self,
@@ -430,9 +430,8 @@ impl Coco for tdx::Tdx {
         low_uaddr: *const u8,
         img: &elf::Loaded,
     ) -> io::Result<()> {
-        // KVM's per-vCPU cpuid (used for its own X2APIC/MTRR checks) is
-        // independent of what `INIT_VM` told the module; the module
-        // virtualises `cpuid` itself.
+        // KVM's vCPU cpuid (X2APIC check) is independent of what INIT_VM
+        // told the module, which virtualises `cpuid` itself.
         kvm::passthrough_cpuid(&kvm, vcpu)?;
         self.launch(vm, vcpu, low_uaddr, img.lo, img.hi - img.lo, &img.reset)?;
         eprintln!(

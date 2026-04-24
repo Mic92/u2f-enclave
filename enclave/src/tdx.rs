@@ -34,10 +34,7 @@ const TDVMCALL_REPORT_FATAL_ERROR: u64 = 0x10003;
 /// Registers exposed to the VMM on TDVMCALL: r10..r15.
 const VMCALL_EXPOSE: u64 = 0xfc00;
 
-const _PORT_READ: u64 = 0;
 const PORT_WRITE: u64 = 1;
-const _EPT_READ: u64 = 0;
-const _EPT_WRITE: u64 = 1;
 
 // --- raw TDCALL ----------------------------------------------------------
 
@@ -67,9 +64,8 @@ fn tdvmcall(r11: u64, r12: u64, r13: u64, r14: u64, r15: u64) -> (u64, u64) {
 
 // --- bring-up ------------------------------------------------------------
 
-/// We force GPAW=48 in `KVM_TDX_INIT_VM`, so the shared bit is always 47;
-/// hard-coding it (and asserting `%ebx` from `TDH.VP.INIT` agrees later)
-/// keeps every PTE constant for offline measurement.
+/// We force GPAW=48 in `KVM_TDX_INIT_VM` so this is fixed; keeps PTEs and
+/// the offline measurement host-independent.
 pub const SHARED_BIT: u32 = 47;
 
 pub fn init() {

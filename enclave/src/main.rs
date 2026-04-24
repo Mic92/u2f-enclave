@@ -55,9 +55,8 @@ pub extern "C" fn rust64_start(tag: u32) -> ! {
         serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
     }
     if tdx::active() {
-        // vsock rings are not yet flipped to shared under TDX, so the
-        // vhost data path can't reach them. Halt cleanly once serial has
-        // proven the launch + paravirt I/O round-trip.
+        // Halt before vsock: rings are not MapGPA-shared under TDX so
+        // vhost can't reach them.
         serial::print("u2f-enclave: TDX active, paravirt up\n");
         debug_exit(0);
     }

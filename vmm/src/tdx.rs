@@ -67,8 +67,8 @@ struct TdxInitMem {
 
 pub struct Tdx {
     _gmem: OwnedFd,
-    /// Page-aligned scratch for `INIT_MEM_REGION`'s `source_addr`; doubles
-    /// as the reset slot's userspace alias (never read once private).
+    /// Page-aligned scratch for `INIT_MEM_REGION`'s reset source; also the
+    /// reset slot's (unused) userspace alias.
     reset_va: *mut u8,
 }
 
@@ -124,10 +124,8 @@ impl Tdx {
         }
 
         let init = Box::new(TdxInitVm {
-            // SEPT #VE on unaccepted private memory would triple-fault our
-            // IDT-less guest; disabling it means a VMM bug surfaces as an
-            // EPT violation in KVM instead. Masked: not all module versions
-            // expose it (newer ones make it always-on).
+            // SEPT #VE on unaccepted memory would triple-fault our
+            // IDT-less guest. Masked: newer modules make it always-on.
             attributes: TDX_ATTR_SEPT_VE_DISABLE & caps.supported_attrs,
             xfam: 0, // kernel ORs in xfam_fixed1 (x87|SSE)
             mrconfigid: [0; 6],
@@ -142,8 +140,6 @@ impl Tdx {
         });
         tdx_op(vm, KVM_TDX_INIT_VM, 0, &*init as *const _ as u64)?;
 
-        // One guest_memfd backs both regions: low RAM at offset 0, the
-        // reset page tacked on at the end.
         let gmem_size = mem_size + 0x1000;
         let mut gm = kvm::CreateGuestMemfd {
             size: gmem_size,
@@ -215,8 +211,6 @@ impl Tdx {
         // `data` becomes the guest's initial RCX; we don't need a TD-HOB.
         tdx_op(vcpu, KVM_TDX_INIT_VCPU, 0, 0)?;
 
-        // INIT_MEM_REGION's `source_addr` must be page-aligned; reuse the
-        // reset slot's mmap as scratch.
         unsafe {
             self.reset_va
                 .copy_from_nonoverlapping(reset_page.as_ptr(), 4096)

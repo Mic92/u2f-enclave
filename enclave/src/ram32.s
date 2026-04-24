@@ -64,12 +64,10 @@ ram32_start:
     movl %esi, %edi               /* SysV arg0: 0 = plain, >=32 = SEV C-bit */
     ljmpl $0x08, $rust64_start
 
-/* TDX entry, near-jumped to from the reset stub at 0xFFFFFFF0. The TDX
- * module has already loaded flat 4 GiB CS/DS (base 0, AR 0xC09B/0xC093),
- * CR0=PE|NE, CR4=MCE|VMXE and EFER.LME=1
- * (intel/tdx-module td_vmcs_init.c). So this is the same 32→64 dance
- * minus the C-bit OR and minus the EFER write — wrmsr to EFER is in the
- * module's #VE list. */
+/* TDX entry, jumped to from the reset stub at 0xFFFFFFF0. The TDX module
+ * already set flat 4 GiB CS/DS, CR0=PE|NE, CR4=MCE|VMXE and EFER.LME=1
+ * (intel/tdx-module td_vmcs_init.c) — so no C-bit OR, no EFER write
+ * (wrmsr to EFER #VEs). */
 .global ram32_tdx
 ram32_tdx:
     cli
@@ -95,12 +93,11 @@ ram32_tdx:
     movl $1, %edi                /* SysV arg0: 1 = TDX */
     ljmpl $0x08, $rust64_start
 
-/* TDX hard-codes RIP=0xFFFFFFF0 with flat CS/DS (base 0, limit 4 GiB).
- * The vmm puts this 4 KiB page at GPA 0xFFFFF000 in its own memslot —
- * SEV/plain boots ignore the segment entirely. A direct `jmp ram32_tdx`
- * would need a rel32 across the 4 GiB wrap, which the ELF64 linker
- * refuses; instead store the absolute target as data and jump through
- * it (DS base is 0, so the moffs32 is a flat linear address). */
+/* TDX hard-codes RIP=0xFFFFFFF0 with flat base-0 CS/DS. The vmm puts
+ * this page at GPA 0xFFFFF000; SEV/plain boots never map the segment.
+ * A direct `jmp ram32_tdx` would need a rel32 across the 4 GiB wrap,
+ * which the ELF64 linker refuses, so jump through an absolute pointer
+ * stored in the page. */
 .section .reset, "ax"
 .code32
 .fill 0xfe8, 1, 0
