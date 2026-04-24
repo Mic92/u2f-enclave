@@ -7,7 +7,7 @@ use std::io;
 
 use crate::vhost::Vhost;
 
-/// Same address the guest scans first; one slot is enough.
+/// Single slot, at the address the guest's `virtio::MMIO_BASE` expects.
 pub const BASE: u64 = 0xfeb0_0000;
 pub const SIZE: u64 = 0x200;
 

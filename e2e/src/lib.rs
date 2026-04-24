@@ -1,9 +1,10 @@
 //! Shared harness for the end-to-end smoke tests.
 //!
 //! These tests drive real external programs (libfido2, OpenSSH) against
-//! the workspace binaries, so they need `/dev/uhid` and `/dev/vhost-vsock`
-//! and cannot run in a sandboxed builder. Each test takes [`serial_guard`]
-//! because they all share one uhid device name and one vsock CID.
+//! the workspace binaries, so they need privileged device nodes (`/dev/uhid`,
+//! `/dev/kvm`, `/dev/vhost-vsock`, `/dev/sev`) and cannot run in a sandboxed
+//! builder. Each test takes [`serial_guard`] because they all share one uhid
+//! device name and one vsock CID.
 
 use std::fs;
 use std::path::{Path, PathBuf};

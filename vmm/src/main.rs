@@ -4,12 +4,9 @@
 //! mode, flat segments, paging off, EIP = PHYS32_ENTRY), and runs it.
 //! Emulated: COM1 (write-only, to stderr), the `isa-debug-exit` port, and a
 //! single virtio-mmio vsock device whose data path is offloaded to
-//! `/dev/vhost-vsock`. No firmware, no irqchip, no BIOS tables — the guest
-//! never looks for any.
-//!
-//! This is the host-side half of "own the whole stack": the unikernel
-//! hand-rolls virtio, this hand-rolls the VMM. SEV-SNP launch ioctls slot
-//! in here later.
+//! `/dev/vhost-vsock`. With `--snp` the guest is launched as a SEV-SNP
+//! confidential VM (see `snp.rs`). No firmware, no irqchip, no BIOS tables
+//! — the guest never looks for any.
 
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
@@ -60,8 +57,7 @@ fn main() -> io::Result<()> {
     }
     let mem_slice = unsafe { std::slice::from_raw_parts_mut(mem as *mut u8, MEM_SIZE) };
 
-    // SNP: SEV_INIT2 must precede vCPU creation; sets up guest_memfd-backed
-    // memslot and marks all of guest RAM private. Non-SNP: plain memslot.
+    // SEV_INIT2 must precede vCPU creation.
     let snp = if snp {
         Some(snp::Snp::init(&vm, mem as *mut u8, MEM_SIZE as u64)?)
     } else {
@@ -114,7 +110,6 @@ fn main() -> io::Result<()> {
     setup_pvh_cpu(&vcpu, img.entry, c_bit)?;
 
     if let Some(s) = &snp {
-        // After SET_{REGS,SREGS}: KVM snapshots them into the VMSA at FINISH.
         s.launch(
             &vm,
             unsafe { (mem as *const u8).add(img.lo as usize) },
