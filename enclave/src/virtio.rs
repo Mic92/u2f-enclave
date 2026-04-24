@@ -6,6 +6,7 @@
 //! MMIO access becomes a #VC anyway, so keeping this surface tiny matters.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::sync::atomic::{compiler_fence, Ordering};
 
 /// QEMU `microvm` first virtio-mmio slot (`include/hw/i386/microvm.h`).
 pub const MMIO_BASE: usize = 0xfeb0_0000;
@@ -17,22 +18,16 @@ const STATUS_DRIVER: u32 = 2;
 const STATUS_DRIVER_OK: u32 = 4;
 const STATUS_FEATURES_OK: u32 = 8;
 
-#[allow(dead_code)]
 mod reg {
     pub const MAGIC: usize = 0x000;
     pub const VERSION: usize = 0x004;
     pub const DEVICE_ID: usize = 0x008;
-    pub const DEV_FEAT_SEL: usize = 0x014;
-    pub const DEV_FEAT: usize = 0x010;
     pub const DRV_FEAT_SEL: usize = 0x024;
     pub const DRV_FEAT: usize = 0x020;
     pub const QUEUE_SEL: usize = 0x030;
-    pub const QUEUE_NUM_MAX: usize = 0x034;
     pub const QUEUE_NUM: usize = 0x038;
     pub const QUEUE_READY: usize = 0x044;
     pub const QUEUE_NOTIFY: usize = 0x050;
-    pub const INT_STATUS: usize = 0x060;
-    pub const INT_ACK: usize = 0x064;
     pub const STATUS: usize = 0x070;
     pub const QUEUE_DESC_LO: usize = 0x080;
     pub const QUEUE_DESC_HI: usize = 0x084;
@@ -189,10 +184,12 @@ impl Virtq {
         }
     }
 
-    /// Chain descriptors as a singly-linked free list.
+    /// Chain descriptors as a singly-linked free list. The last `next` is
+    /// past-the-end so over-allocation panics on the index instead of
+    /// silently double-allocating.
     pub fn init_free(&mut self) {
         for i in 0..Q {
-            self.desc[i].next = (i as u16 + 1) % Q as u16;
+            self.desc[i].next = i as u16 + 1;
         }
         self.free_head = 0;
     }
@@ -243,7 +240,6 @@ impl Virtq {
         self.publish(d0);
     }
 
-    /// Push a single driver-readable buffer.
     pub fn push_read(&mut self, a: *const u8, alen: u32) {
         let d = self.alloc();
         self.desc[d as usize] = Desc {
@@ -258,17 +254,17 @@ impl Virtq {
     fn publish(&mut self, head: u16) {
         self.avail.ring[(self.avail_idx as usize) % Q] = head;
         self.avail_idx = self.avail_idx.wrapping_add(1);
-        // Device must see descriptor before idx bump.
-        unsafe { core::arch::asm!("", options(nostack, preserves_flags)) };
+        compiler_fence(Ordering::Release);
         unsafe { write_volatile(addr_of_mut!(self.avail.idx), self.avail_idx) };
     }
 
-    /// Pop one used element, returning (head, written_len, chain_len).
-    pub fn pop_used(&mut self) -> Option<(u16, u32, u16)> {
+    /// Pop one used element, returning (head, written_len).
+    pub fn pop_used(&mut self) -> Option<(u16, u32)> {
         let device_idx = unsafe { read_volatile(addr_of!(self.used.idx)) };
         if self.last_used == device_idx {
             return None;
         }
+        compiler_fence(Ordering::Acquire);
         let e = self.used.ring[(self.last_used as usize) % Q];
         self.last_used = self.last_used.wrapping_add(1);
         let mut n = 1u16;
@@ -278,6 +274,6 @@ impl Virtq {
             n += 1;
         }
         self.free(e.id as u16, n);
-        Some((e.id as u16, e.len, n))
+        Some((e.id as u16, e.len))
     }
 }

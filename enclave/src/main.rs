@@ -41,23 +41,17 @@ pub extern "C" fn rust64_start() -> ! {
     serial::init();
     serial::print("u2f-enclave: boot\n");
 
-    let mut auth = ctap::Authenticator::new(platform::BareMetal::new(), ctap::AAGUID);
-
     let Some(vs) = vsock::init(VSOCK_PORT) else {
-        // No virtio-vsock (e.g. plain `pc` machine in CI) — keep the link
-        // smoke so `boot-enclave.sh` still has something to assert on.
-        let out = auth.process_report(&[0u8; ctap::HID_REPORT_SIZE]);
-        serial::print("u2f-enclave: ctap link ok, resp pkts=");
-        serial::print_u32(out.len() as u32);
-        serial::print("\nu2f-enclave: no vsock, halt\n");
+        serial::print("u2f-enclave: no vsock, halt\n");
         qemu_exit(0);
     };
     serial::print("u2f-enclave: vsock cid=");
-    serial::print_u32(vsock::guest_cid(vs) as u32);
+    serial::print_u32(vs.cid() as u32);
     serial::print(" port=");
     serial::print_u32(VSOCK_PORT);
     serial::print("\n");
 
+    let mut auth = ctap::Authenticator::new(platform::BareMetal::new(), ctap::AAGUID);
     let mut report = [0u8; ctap::HID_REPORT_SIZE];
     loop {
         vs.read_report(&mut report);

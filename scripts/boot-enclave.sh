@@ -14,7 +14,7 @@ out=$(timeout 10 qemu-system-x86_64 \
 	-device isa-debug-exit,iobase=0xf4,iosize=0x04 2>&1) || rc=$?
 
 printf '%s\n' "$out"
-grep -q 'ctap link ok' <<<"$out"
+grep -q 'u2f-enclave: no vsock, halt' <<<"$out"
 [ "$rc" -eq 1 ] || {
 	echo "unexpected qemu exit $rc" >&2
 	exit 1
