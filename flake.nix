@@ -1,22 +1,24 @@
 {
   description = "u2f-enclave: FIDO2 authenticator running as a confidential VM (SEV-SNP)";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-parts.url = "github:hercules-ci/flake-parts";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
-    inputs@{ flake-parts, ... }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [
+    { self, nixpkgs }:
+    let
+      forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
         "aarch64-linux"
       ];
-      perSystem =
-        { pkgs, ... }:
+    in
+    {
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
         {
-          devShells.default = pkgs.mkShell {
+          default = pkgs.mkShell {
             packages = with pkgs; [
               rustc
               cargo
@@ -27,8 +29,9 @@
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };
+        }
+      );
 
-          formatter = pkgs.nixfmt-rfc-style;
-        };
+      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-tree);
     };
 }
