@@ -1,7 +1,7 @@
 //! 16550 UART on the legacy COM1 port for bring-up logging.
 //!
 //! Port I/O routes through `pv` so the vmm sees plain `KVM_EXIT_IO`
-//! whether the guest is plain, SEV-SNP or TDX.
+//! whether the guest is plain or SEV-SNP.
 
 use crate::pv::{inb, outb};
 

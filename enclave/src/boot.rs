@@ -79,7 +79,7 @@ pub static mut PML4: PageTable = PageTable([0; 512]);
 pub static mut PDPT: PageTable = PageTable([0; 512]);
 
 /// 4 KiB-granular tables for [0, 2 MiB) so individual pages can be flipped
-/// to shared (C=0 on SEV, shared-bit on TDX) while the rest stays private.
+/// to shared (C=0) while the rest stays private.
 static mut PD0: PageTable = PageTable([0; 512]);
 static mut PT0: PageTable = PageTable([0; 512]);
 
@@ -89,9 +89,9 @@ pub fn flush_tlb() {
 }
 
 /// Replace the [0, 1 GiB) huge leaf with a PD whose first entry is a 4 KiB
-/// PT. `leaf_or` (C-bit on SEV, 0 on TDX) goes into every leaf. Safe to run
-/// while executing out of this range: new leaves map the same PAs with the
-/// same encryption disposition.
+/// PT. `leaf_or` (the C-bit) goes into every leaf. Safe to run while
+/// executing out of this range: new leaves map the same PAs with the same
+/// encryption disposition.
 pub fn refine_low_2m(leaf_or: u64) {
     let pt0 = unsafe { &mut *addr_of_mut!(PT0) };
     let pd0 = unsafe { &mut *addr_of_mut!(PD0) };

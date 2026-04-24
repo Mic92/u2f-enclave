@@ -1,9 +1,8 @@
-//! Relying-party side: parse a hardware report from `attStmt`, check its
-//! measurement against this build's expected value, and — for SNP — its
-//! VCEK signature. Host code, not in the TCB.
+//! Relying-party side: parse an SNP attestation report, verify its VCEK
+//! signature, and check the measurement against this build's expected value.
+//! Host code, not in the TCB.
 //!
-//! Refs: SNP firmware ABI §7.3 (Table 22 report layout), AMD KDS spec;
-//! TDX module ABI (TDREPORT_STRUCT).
+//! Refs: SNP firmware ABI §7.3 (Table 22 report layout), AMD KDS spec.
 
 use std::path::PathBuf;
 use std::{env, fs, io, io::Read};
@@ -13,7 +12,6 @@ use p384::ecdsa::{Signature, VerifyingKey};
 use sha2::{Digest, Sha384};
 
 pub const REPORT_LEN: usize = 1184;
-pub const TDREPORT_LEN: usize = 1024;
 
 /// Borrowed view over a 1184-byte `ATTESTATION_REPORT`. Signature covers
 /// `[0..0x2a0]`.
@@ -143,30 +141,28 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// `u2f-enclave verify [--vcek FILE]`: read a report on stdin, dispatch on
-/// length (1184 = SNP, 1024 = TDX). The credential-binding check
-/// (`report_data == SHA-512(authData ‖ cdh)`) stays with the caller — they
-/// have those bytes, we don't — so print `report_data` for them.
-pub fn cmd(vcek_path: Option<String>, snp_expected: [u8; 48], tdx_expected: [u8; 48]) -> i32 {
+/// `u2f-enclave verify [--vcek FILE]`: read a 1184-byte report on stdin,
+/// check its VCEK signature and that its measurement matches this build.
+/// The credential-binding check (`report_data == SHA-512(authData ‖ cdh)`)
+/// stays with the caller — they have those bytes, we don't — so print
+/// `report_data` for them.
+pub fn cmd(vcek_path: Option<String>, expected: [u8; 48]) -> i32 {
     let mut buf = Vec::new();
     if let Err(e) = io::stdin().read_to_end(&mut buf) {
         eprintln!("verify: read stdin: {e}");
         return 2;
     }
-    match buf.len() {
-        REPORT_LEN => verify_snp(vcek_path, &buf.try_into().unwrap(), snp_expected),
-        TDREPORT_LEN => verify_tdx(&buf.try_into().unwrap(), tdx_expected),
-        n => {
+    let buf: [u8; REPORT_LEN] = match buf.try_into() {
+        Ok(b) => b,
+        Err(b) => {
             eprintln!(
-                "verify: stdin is {n} bytes; expected {REPORT_LEN} (SNP) or {TDREPORT_LEN} (TDX)"
+                "verify: stdin is {} bytes; expected {REPORT_LEN} (raw SNP report)",
+                b.len()
             );
-            2
+            return 2;
         }
-    }
-}
-
-fn verify_snp(vcek_path: Option<String>, buf: &[u8; REPORT_LEN], expected: [u8; 48]) -> i32 {
-    let r = Report(buf);
+    };
+    let r = Report(&buf);
     let vcek = match vcek_path {
         Some(p) => fs::read(&p).map_err(|e| format!("read {p}: {e}")),
         None => find_vcek(&r),
@@ -201,42 +197,6 @@ fn verify_snp(vcek_path: Option<String>, buf: &[u8; REPORT_LEN], expected: [u8; 
     eprintln!("verify: caller must also check report_data == SHA-512(authData || clientDataHash)");
 
     if sig_ok && meas_ok && pol_ok {
-        0
-    } else {
-        1
-    }
-}
-
-/// A raw TDREPORT carries a MAC keyed on a CPU-internal secret; nothing
-/// off the originating chip can check it. So unlike SNP this proves the
-/// *claimed* contents match this build, not that real hardware produced
-/// them — and we say so.
-fn verify_tdx(buf: &[u8; TDREPORT_LEN], expected: [u8; 48]) -> i32 {
-    let report_data = &buf[128..192];
-    let attributes = u64::from_le_bytes(buf[512..520].try_into().unwrap());
-    let xfam = u64::from_le_bytes(buf[520..528].try_into().unwrap());
-    let mrtd = &buf[528..576];
-    let meas_ok = mrtd == expected;
-
-    println!("report_data   {}", hex(report_data));
-    println!(
-        "mrtd          {}  {}",
-        hex(mrtd),
-        if meas_ok {
-            "ok (matches this build)"
-        } else {
-            "FAIL"
-        }
-    );
-    println!("attributes    {attributes:#018x}");
-    println!("xfam          {xfam:#018x}");
-    eprintln!(
-        "verify: WARNING: a raw TDREPORT is not signed. A hostile host can forge it.\n\
-         verify: exit 0 here means only \"MRTD matches this build\", not \"ran on Intel hardware\".\n\
-         verify: remote proof needs a Quote (host-side SGX QGS), which this report is not.\n\
-         verify: caller must also check report_data == SHA-512(authData || clientDataHash)"
-    );
-    if meas_ok {
         0
     } else {
         1

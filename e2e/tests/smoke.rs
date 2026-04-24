@@ -18,44 +18,6 @@ fn libfido2_vmm() {
     fido2_roundtrip(&be.hidraw);
 }
 
-/// Full TDX path end to end: encrypted launch, ram32_tdx, virtio-mmio +
-/// MapGPA-shared rings via TDVMCALL, vhost-vsock, uhid bridge, libfido2
-/// register/assert/verify. No firmware, no `#VE` handler.
-#[test]
-fn libfido2_vmm_tdx() {
-    let _g = serial_guard();
-    if !need_writable("/dev/uhid")
-        || !need_writable("/dev/vhost-vsock")
-        || !need_writable("/dev/kvm")
-        || !have_tdx()
-    {
-        return;
-    }
-    let be = vmm_backend("--tdx");
-    fido2_roundtrip(&be.hidraw);
-
-    let cdh = [0x22u8; 32];
-    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "tdx");
-    assert_eq!(rep.len(), 1024);
-
-    // Documented user flow. TDREPORT MAC is not remotely checkable, so
-    // exit 0 proves predictor==module (a TDX-module or KVM ordering change
-    // shows up as exit 1, not silent drift) — not a hardware signature.
-    let out = pipe(
-        Command::new(host_bin("u2f-enclave"))
-            .arg("verify")
-            .stderr(std::process::Stdio::inherit()),
-        &rep,
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    eprint!("{stdout}");
-    assert!(out.status.success(), "u2f-enclave verify (tdx) failed");
-
-    use sha2::Digest;
-    let want_rd: [u8; 64] = sha2::Sha512::digest([ad.as_slice(), &cdh].concat()).into();
-    assert_eq!(&rep[128..192], &want_rd[..], "report_data not bound");
-}
-
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
 /// GHCB, virtqueue rings PSC'd shared, vhost-vsock data path, uhid bridge,
 /// libfido2 register/assert/verify. No firmware, no `#VC` handler.
@@ -76,7 +38,7 @@ fn libfido2_vmm_snp() {
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x11u8; 32];
-    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
+    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org");
     assert_eq!(rep.len(), 1184);
 
     // Documented user flow: vcek-url → curl → verify --vcek.
@@ -125,7 +87,7 @@ fn libfido2_vmm_snp() {
     let m1 = rep[0x90..0xc0].to_vec();
     drop(be);
     let be = vmm_backend("--snp");
-    let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
+    let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org");
     assert_eq!(
         &rep2[0x90..0xc0],
         m1,

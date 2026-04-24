@@ -17,7 +17,6 @@ mod kvm;
 mod measure;
 mod mmio;
 mod snp;
-mod tdx;
 mod verify;
 mod vhost;
 
@@ -33,14 +32,13 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure              print this build's SNP and TDX launch
-                                     measurements and exit
-  u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP or 1024-byte TDX
-                                     report on stdin; check its measurement
-                                     matches this build (and, for SNP, its
-                                     VCEK signature); print report_data for
-                                     the caller's binding check; exit 0 iff
-                                     ok. TDX: see warning in output
+  u2f-enclave --measure              print this build's SNP launch
+                                     measurement and exit
+  u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
+                                     check its VCEK signature and that its
+                                     measurement matches this build; print
+                                     report_data for the caller's binding
+                                     check; exit 0 iff ok
   u2f-enclave vcek-url               read a report on stdin, print the AMD
                                      URL to fetch its chip's certificate
   u2f-enclave attest [DEVICE]        demo client: register a credential on
@@ -50,7 +48,6 @@ Usage:
                                      `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
-  --tdx        launch under Intel TDX (encrypted+measured)
   GUEST_CID    AF_VSOCK context ID for the guest (default 42)
   --vcek FILE  VCEK certificate (DER). Without it, verify looks in
                $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
@@ -81,12 +78,10 @@ fn main() -> io::Result<()> {
             eprint!("{USAGE}");
             std::process::exit(2);
         }
-        let (snp, tdx) = expected_digests()?;
-        std::process::exit(verify::cmd(vcek, snp, tdx));
+        std::process::exit(verify::cmd(vcek, expected_measurement()?));
     }
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();
-    let tdx = !measure && !snp && args.next_if_eq("--tdx").is_some();
     let cid: u64 = match args.next().map(|s| s.parse()) {
         None => 42,
         Some(Ok(n)) if !measure => n,
@@ -104,19 +99,11 @@ fn main() -> io::Result<()> {
     if api != 12 {
         return Err(io::Error::other("KVM API != 12"));
     }
-    let vm_type = if snp {
-        kvm::KVM_X86_SNP_VM
-    } else if tdx {
-        kvm::KVM_X86_TDX_VM
-    } else {
-        0
-    };
+    let vm_type = if snp { kvm::KVM_X86_SNP_VM } else { 0 };
     let vm = kvm::ioctl_fd(&kvm, kvm::KVM_CREATE_VM, vm_type).map_err(|e| {
-        if vm_type != 0 {
+        if snp {
             io::Error::other(format!(
-                "KVM_CREATE_VM(type {vm_type}): {e} — \
-                 --snp needs an EPYC host with kvm_amd sev_snp=Y; \
-                 --tdx needs a Xeon host with kvm_intel tdx=1"
+                "KVM_CREATE_VM(SNP): {e} — needs an EPYC host with kvm_amd sev_snp=Y"
             ))
         } else {
             e
@@ -138,29 +125,14 @@ fn main() -> io::Result<()> {
     }
     let mem_slice = unsafe { std::slice::from_raw_parts_mut(mem as *mut u8, MEM_SIZE) };
 
-    if vm_type != 0 {
-        // Both SEV PSC and TDX MapGPA surface as KVM_HC_MAP_GPA_RANGE; the
-        // run loop's handler is shared.
+    // SEV_INIT2 must precede vCPU creation.
+    let coco = if snp {
         kvm::enable_cap(
             &vm,
             kvm::KVM_CAP_EXIT_HYPERCALL,
             1 << kvm::KVM_HC_MAP_GPA_RANGE,
         )?;
-    }
-
-    // SEV_INIT2 / KVM_TDX_INIT_VM must precede vCPU creation.
-    let coco: Option<Box<dyn Coco>> = if snp {
-        Some(Box::new(snp::Snp::init(
-            &vm,
-            mem as *mut u8,
-            MEM_SIZE as u64,
-        )?))
-    } else if tdx {
-        Some(Box::new(tdx::Tdx::init(
-            &vm,
-            mem as *mut u8,
-            MEM_SIZE as u64,
-        )?))
+        Some(snp::Snp::init(&vm, mem as *mut u8, MEM_SIZE as u64)?)
     } else {
         let mut region = kvm::UserMemRegion {
             slot: 0,
@@ -175,8 +147,8 @@ fn main() -> io::Result<()> {
 
     let img = elf::load(ENCLAVE, mem_slice)?;
 
-    // vhost reads rings/buffers via the anon mmap; under SNP/TDX that is
-    // the shared half of the memslot, so no special handling.
+    // vhost reads rings/buffers via the anon mmap; under SNP that is the
+    // shared half of the memslot, so no special handling.
     let mut vsock = match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
         Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
         Err(e) => {
@@ -205,17 +177,19 @@ fn main() -> io::Result<()> {
     }
     let run_hdr = run as *mut kvm::RunHdr;
 
+    kvm::passthrough_cpuid(&kvm, &vcpu)?;
+    setup_pvh_cpu(&vcpu, img.entry, snp)?;
     if let Some(c) = &coco {
         c.launch(
-            kvm.as_raw_fd(),
             &vm,
-            &vcpu,
             unsafe { (mem as *const u8).add(img.lo as usize) },
-            &img,
+            img.lo,
+            img.hi - img.lo,
         )?;
-    } else {
-        kvm::passthrough_cpuid(&kvm, &vcpu)?;
-        setup_pvh_cpu(&vcpu, img.entry, false)?;
+        eprintln!(
+            "u2f-enclave: SEV-SNP launch ok ({} KiB measured)",
+            (img.hi - img.lo) >> 10
+        );
     }
 
     if vsock.is_some() {
@@ -298,15 +272,6 @@ fn main() -> io::Result<()> {
                         eprintln!("u2f-enclave: SEV terminate ghcb={ghcb:#x} reason={reason:#x}");
                         std::process::exit(reason as i32);
                     }
-                    kvm::SYSTEM_EVENT_TDX_FATAL => {
-                        // KVM dumps GPRs in VCPU_REGS_* order; r12 is the
-                        // GHCI error code.
-                        eprintln!(
-                            "u2f-enclave: TDX fatal r12={:#x} r13={:#x}",
-                            ev.data[12], ev.data[13]
-                        );
-                        std::process::exit(0x7f);
-                    }
                     t => return Err(io::Error::other(format!("system event {t}"))),
                 }
             }
@@ -352,46 +317,44 @@ pub fn open_dev(p: &str) -> io::Result<std::fs::File> {
         })
 }
 
-fn expected_digests() -> io::Result<([u8; 48], [u8; 48])> {
+fn expected_measurement() -> io::Result<[u8; 48]> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
-    Ok((
-        measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa),
-        measure::mrtd(&mem, img.lo, img.hi, &img.reset),
+    Ok(measure::launch_digest(
+        &mem,
+        img.lo,
+        img.hi,
+        snp::SECRETS_GPA,
+        &vmsa,
     ))
 }
 
-/// Recompute the launch measurements from the embedded ELF: labelled hex
-/// to stdout (so it composes with `grep`/`awk`), context to stderr.
+/// Recompute the launch measurement from the embedded ELF: hex to stdout
+/// (composes with shell tooling), context to stderr.
 fn print_measure() -> io::Result<()> {
     let mut mem = vec![0u8; MEM_SIZE];
     let img = elf::load(ENCLAVE, &mut mem)?;
     let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
-    let mrtd = measure::mrtd(&mem, img.lo, img.hi, &img.reset);
 
     println!("snp  {}", verify::hex(&ld));
-    println!("tdx  {}", verify::hex(&mrtd));
     io::stdout().flush()?;
     eprintln!(
-        "↑ launch measurements for this build.\n  \
-         attStmt[\"snp\"] (1184 B) carries `snp` at 0x90..0xc0; check it\n    \
-           after verifying the VCEK signature.\n  \
-         attStmt[\"tdx\"] (1024 B) carries `tdx` at 0x210..0x240 (MRTD).\n\
+        "↑ SNP launch measurement for this build.\n  \
+         attStmt[\"snp\"] (1184 B) carries it at 0x90..0xc0; check it\n    \
+           after verifying the VCEK signature.\n\
          inputs:\n  \
          guest image  {:#x}..{:#x} ({} KiB, {} pages)\n  \
-         reset page   {:#x}\n  \
          entry        {:#x}\n  \
-         secrets gpa  {:#x} (snp)\n  \
-         vmsa gpa     {:#x} (snp)\n  \
-         c-bit        {}    (snp)\n\
-         (snp: also check report.policy == {:#x}; not part of the digest)",
+         secrets gpa  {:#x}\n  \
+         vmsa gpa     {:#x}\n  \
+         c-bit        {}\n\
+         (also check report.policy == {:#x}; not part of the digest)",
         img.lo,
         img.hi,
         (img.hi - img.lo) >> 10,
         (img.hi - img.lo) >> 12,
-        elf::RESET_GPA,
         img.entry,
         snp::SECRETS_GPA,
         measure::VMSA_GPA,
@@ -399,61 +362,6 @@ fn print_measure() -> io::Result<()> {
         snp::SNP_POLICY,
     );
     Ok(())
-}
-
-use std::os::fd::{OwnedFd, RawFd};
-
-/// Per-vendor encrypted+measured launch.
-trait Coco {
-    fn launch(
-        &self,
-        kvm: RawFd,
-        vm: &OwnedFd,
-        vcpu: &OwnedFd,
-        low_uaddr: *const u8,
-        img: &elf::Loaded,
-    ) -> io::Result<()>;
-}
-
-impl Coco for snp::Snp {
-    fn launch(
-        &self,
-        kvm: RawFd,
-        vm: &OwnedFd,
-        vcpu: &OwnedFd,
-        low_uaddr: *const u8,
-        img: &elf::Loaded,
-    ) -> io::Result<()> {
-        kvm::passthrough_cpuid(&kvm, vcpu)?;
-        setup_pvh_cpu(vcpu, img.entry, true)?;
-        self.launch(vm, low_uaddr, img.lo, img.hi - img.lo)?;
-        eprintln!(
-            "u2f-enclave: SEV-SNP launch ok ({} KiB measured)",
-            (img.hi - img.lo) >> 10
-        );
-        Ok(())
-    }
-}
-
-impl Coco for tdx::Tdx {
-    fn launch(
-        &self,
-        kvm: RawFd,
-        vm: &OwnedFd,
-        vcpu: &OwnedFd,
-        low_uaddr: *const u8,
-        img: &elf::Loaded,
-    ) -> io::Result<()> {
-        // KVM's vCPU cpuid (X2APIC check) is independent of what INIT_VM
-        // told the module, which virtualises `cpuid` itself.
-        kvm::passthrough_cpuid(&kvm, vcpu)?;
-        self.launch(vm, vcpu, low_uaddr, img.lo, img.hi - img.lo, &img.reset)?;
-        eprintln!(
-            "u2f-enclave: TDX launch ok ({} KiB + reset page measured)",
-            (img.hi - img.lo) >> 10
-        );
-        Ok(())
-    }
 }
 
 /// PVH initial state per `xen/include/public/arch-x86/hvm/start_info.h`:

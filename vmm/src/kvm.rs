@@ -42,10 +42,8 @@ pub const KVM_SET_MEMORY_ATTRIBUTES: libc::c_ulong = iow::<MemAttrs>(0xd2);
 pub const KVM_CREATE_GUEST_MEMFD: libc::c_ulong = iowr::<CreateGuestMemfd>(0xd4);
 
 pub const KVM_X86_SNP_VM: libc::c_ulong = 4;
-pub const KVM_X86_TDX_VM: libc::c_ulong = 5;
 pub const KVM_MEM_GUEST_MEMFD: u32 = 1 << 2;
 pub const KVM_MEMORY_ATTRIBUTE_PRIVATE: u64 = 1 << 3;
-pub const KVM_CAP_SPLIT_IRQCHIP: u32 = 121;
 pub const KVM_CAP_EXIT_HYPERCALL: u32 = 201;
 pub const KVM_HC_MAP_GPA_RANGE: u64 = 12;
 
@@ -57,7 +55,6 @@ pub const EXIT_SHUTDOWN: u32 = 8;
 pub const EXIT_SYSTEM_EVENT: u32 = 24;
 
 pub const SYSTEM_EVENT_SEV_TERM: u32 = 6;
-pub const SYSTEM_EVENT_TDX_FATAL: u32 = 7;
 
 pub const IO_IN: u8 = 0;
 pub const IO_OUT: u8 = 1;
@@ -240,50 +237,37 @@ pub struct RunMmio {
 }
 
 #[repr(C)]
-pub struct Cpuid2Hdr {
-    pub nent: u32,
-    pub padding: u32,
+struct Cpuid2Hdr {
+    _nent: u32,
+    _padding: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct CpuidEntry {
-    pub function: u32,
-    pub index: u32,
-    pub flags: u32,
-    pub eax: u32,
-    pub ebx: u32,
-    pub ecx: u32,
-    pub edx: u32,
-    pub padding: [u32; 3],
+struct CpuidEntry {
+    _fields: [u32; 7],
+    _padding: [u32; 3],
 }
 const _: () = assert!(std::mem::size_of::<CpuidEntry>() == 40);
 
-/// `kvm_cpuid2` (header + N entries) as a single buffer so the same bytes
-/// can be passed to `KVM_SET_CPUID2` and embedded in `KVM_TDX_INIT_VM`.
+const NCPUID: usize = 256;
+
 #[repr(C)]
-pub struct Cpuid2<const N: usize> {
-    pub nent: u32,
-    pub padding: u32,
-    pub entries: [CpuidEntry; N],
+struct Cpuid2 {
+    nent: u32,
+    padding: u32,
+    entries: [CpuidEntry; NCPUID],
 }
 
-pub const NCPUID: usize = 256;
-
-pub fn supported_cpuid(kvm: &impl AsRawFd) -> io::Result<Box<Cpuid2<NCPUID>>> {
+/// Pass everything KVM can virtualise straight through; the guest needs at
+/// least LM, PAE, Page1GB and RDRAND or `ram32.s`/`platform.rs` will fault.
+pub fn passthrough_cpuid(kvm: &impl AsRawFd, vcpu: &impl AsRawFd) -> io::Result<()> {
     let mut c = Box::new(Cpuid2 {
         nent: NCPUID as u32,
         padding: 0,
         entries: [CpuidEntry::default(); NCPUID],
     });
     ioctl(kvm, KVM_GET_SUPPORTED_CPUID, &mut *c as *mut _ as _)?;
-    Ok(c)
-}
-
-/// Pass everything KVM can virtualise straight through; the guest needs at
-/// least LM, PAE, Page1GB and RDRAND or `ram32.s`/`platform.rs` will fault.
-pub fn passthrough_cpuid(kvm: &impl AsRawFd, vcpu: &impl AsRawFd) -> io::Result<()> {
-    let c = supported_cpuid(kvm)?;
     ioctl(vcpu, KVM_SET_CPUID2, &*c as *const _ as libc::c_ulong)?;
     Ok(())
 }
@@ -307,9 +291,6 @@ pub fn ioctl_ref<T>(fd: &impl AsRawFd, req: libc::c_ulong, arg: &mut T) -> io::R
 }
 
 // --- coco helpers ---------------------------------------------------------
-//
-// SNP and TDX share the guest_memfd / region2 / private-attribute setup;
-// only the vendor INIT/LAUNCH ioctls differ.
 
 pub fn enable_cap(vm: &impl AsRawFd, cap: u32, arg0: u64) -> io::Result<()> {
     ioctl_ref(

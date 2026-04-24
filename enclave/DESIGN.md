@@ -130,29 +130,19 @@ resolve — the persistence and the binding are the same mechanism.
 
 ## Computing the measurement offline
 
-`u2f-enclave --measure` recomputes both launch digests from the embedded
-ELF on any machine.
-
-For SNP it lays out PT_LOADs, runs the `PAGE_INFO` SHA-384 chain over
-those pages, the SECRETS page metadata, and a VMSA template that mirrors
-what KVM's `sev_es_sync_vmsa` produces for our PVH register state
-(verified against a `dynamic_debug` hex-dump on a 6.18 kernel). The C-bit
-position travels in `%esi` and is therefore part of the measured state; it
-is hard-coded to 51 (every shipping SNP part) so the result is a function
-of the binary alone, and `Snp::init()` asserts the host agrees.
-
-For TDX it runs the `MEM.PAGE.ADD`/`MR.EXTEND` SHA-384 stream over the
-same PT_LOAD pages plus the reset page, in the exact order `Tdx::launch`
-issues them. `TDH.MNG.INIT` does not feed TD parameters into MRTD, so the
-result depends on the page contents and addresses only.
+`u2f-enclave --measure` recomputes the launch digest from the embedded
+ELF on any machine. It lays out PT_LOADs, runs the `PAGE_INFO` SHA-384
+chain over those pages, the SECRETS page metadata, and a VMSA template
+that mirrors what KVM's `sev_es_sync_vmsa` produces for our PVH register
+state (verified against a `dynamic_debug` hex-dump on a 6.18 kernel). The
+C-bit position travels in `%esi` and is therefore part of the measured
+state; it is hard-coded to 51 (every shipping SNP part) so the result is
+a function of the binary alone, and `Snp::init()` asserts the host
+agrees.
 
 If the computation is wrong, `verify` rejects valid reports; it can't
 accept an invalid one because the PSP only signs what it actually
-measured. The TDREPORT case is weaker: it carries a MAC keyed on a
-CPU-internal secret, not a signature, so a remote verifier cannot check
-it at all without a Quote (which needs the host's SGX quoting enclave).
-`verify` on a 1024-byte input therefore checks MRTD only and prints a
-warning. `e2e::libfido2_vmm_snp` checks the computation against a real
+measured. `e2e::libfido2_vmm_snp` checks the computation against a real
 chip on every run; it has matched on Milan and Genoa across kernels 6.11
 and 6.18 (the measurement is chip- and host-kernel-independent). When it
 fails, dump KVM's actual VMSA and diff against `measure::vmsa_page`:

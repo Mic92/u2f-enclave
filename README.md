@@ -1,11 +1,11 @@
 # u2f-enclave
 
 A FIDO2/CTAP2 authenticator that runs as its own **confidential VM** (AMD
-SEV-SNP or Intel TDX) instead of as a USB dongle. Private keys never leave
-VM-encrypted memory; the consumer talks to it over **vsock** and sees a
-normal `/dev/hidraw` FIDO device via a tiny uhid bridge. Every
-`makeCredential` carries a **hardware report** that binds the new
-credential's public key to the launch measurement of this exact binary.
+SEV-SNP) instead of as a USB dongle. Private keys never leave VM-encrypted
+memory; the consumer talks to it over **vsock** and sees a normal
+`/dev/hidraw` FIDO device via a tiny uhid bridge. Every `makeCredential`
+carries an **SNP attestation report** that binds the new credential's
+public key to the launch measurement of this exact binary.
 
 Open re-implementation of the idea behind *Hardware Authenticator Binding*
 (Shiraishi & Shinagawa, COMPSAC 2025), built from scratch to keep the
@@ -17,14 +17,14 @@ trusted code small rather than forked from an existing firmware stack.
 > your own risk.
 
 ```
-┌──────────── consumer VM ───────────┐      ┌── authenticator CVM (SNP / TDX) ───┐
+┌──────────── consumer VM ───────────┐      ┌──── authenticator CVM (SEV-SNP) ───┐
 │ browser → libfido2 → /dev/hidrawN  │      │                                    │
 │                       ▲            │      │   ┌──────────────────────────┐     │
 │                  uhid │            │      │   │  ctap (no_std)           │     │
 │                ┌──────┴─────┐ vsock│◄────►│   │  CTAPHID + CTAP2 + keys  │     │
 │                │  bridge    │──────┼──────┼──►│                          │     │
 │                └────────────┘      │      │   └──────────────────────────┘     │
-└────────────────────────────────────┘      │   hardware report → attStmt        │
+└────────────────────────────────────┘      │   SNP attestation report → attStmt │
                                             └────────────────────────────────────┘
 ```
 
@@ -108,9 +108,8 @@ laptop$ echo $?
 ```
 
 Exit 0 means: a genuine AMD chip signed this, and what it measured
-matches what this binary would launch. `--measure` prints the SNP and
-TDX measurement hex if you'd rather hard-code them; `--help` lists
-everything.
+matches what this binary would launch. `--measure` prints the
+measurement hex if you'd rather hard-code it; `--help` lists everything.
 
 ## How attestation works
 
@@ -138,25 +137,7 @@ All three pass → the credential's private key exists only inside an
 encrypted VM running this exact binary on a genuine AMD chip.
 
 `verify` does 2 and 3; you do 1 (you have `authData`/`clientDataHash`,
-it doesn't).
-
-### TDX
-
-Under `--tdx` the extra field is `attStmt["tdx"]`: a 1024-byte TDREPORT.
-Checks 1 and 3 work the same way (`report_data` at bytes `128..192`,
-`mrtd` at `528..576`). **Check 2 does not**: a TDREPORT is not signed,
-only MAC'd with a key that never leaves the chip, so nothing off that
-chip can verify it. Converting it to a signed *Quote* needs Intel's SGX
-quoting stack on the host, which this project doesn't depend on.
-
-That means a hostile TDX host can forge the report. `verify` on a
-TDREPORT prints a warning and exit 0 means only "the claimed measurement
-matches this build". Use `--tdx` for memory encryption; for remote proof
-equivalent to SNP, run `--snp` on AMD.
-
-### Reading the report on your server
-
-Your server gets the report as `attStmt["snp"]` (or `["tdx"]`) in the
+it doesn't). Your server gets the report as `attStmt["snp"]` in the
 WebAuthn `attestationObject` the browser posts; whatever WebAuthn
 library you use exposes `attStmt` as a map. In Python:
 
@@ -202,7 +183,7 @@ protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
   rings, guest↔PSP messaging.
 - **Attestation** – report in `attStmt`, VCEK signature verified, measurement
   stable and offline-recomputable, master key persists.
-- **Next** – resident keys / `clientPIN`; TDX.
+- **Next** – resident keys / `clientPIN`; Intel SGX backend.
 
 ## Building
 

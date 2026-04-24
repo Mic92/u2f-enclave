@@ -1,5 +1,5 @@
 //! Raw CTAPHID-over-hidraw driver so the test can read the
-//! `attStmt["snp"]`/`attStmt["tdx"]` entry that stock libfido2 ignores.
+//! `attStmt["snp"]` entry that stock libfido2 ignores.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -48,9 +48,9 @@ impl Hid {
     }
 }
 
-/// Issue a `makeCredential` and return `(authData, attStmt[key])`. Panics
-/// if `key` is absent — that is the property under test.
-pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str, key: &str) -> (Vec<u8>, Vec<u8>) {
+/// Issue a `makeCredential` and return `(authData, attStmt["snp"])`. Panics
+/// if absent — that is the property under test.
+pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8>) {
     use ctap::cbor::Writer;
     let mut w = Writer::new();
     w.map(4);
@@ -88,7 +88,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str, key: &str) -> (Vec<
             3 => {
                 let m = rd.map().unwrap();
                 for _ in 0..m {
-                    if rd.text().unwrap() == key {
+                    if rd.text().unwrap() == "snp" {
                         rep = rd.bytes().unwrap().to_vec();
                     } else {
                         rd.skip().unwrap();
@@ -98,7 +98,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str, key: &str) -> (Vec<
             _ => rd.skip().unwrap(),
         }
     }
-    assert!(!rep.is_empty(), "no {key:?} in attStmt");
+    assert!(!rep.is_empty(), "no \"snp\" in attStmt");
     (auth_data, rep)
 }
 

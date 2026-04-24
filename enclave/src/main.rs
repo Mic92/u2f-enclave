@@ -21,7 +21,6 @@ mod platform;
 mod pv;
 mod serial;
 mod sev;
-mod tdx;
 mod virtio;
 mod vsock;
 
@@ -34,14 +33,12 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static ALLOC: LockedHeap = LockedHeap::empty();
 
 /// 64-bit entry, far-jumped to from `ram32.s` with a valid stack,
-/// [0, 4 GiB) identity-mapped, and `tag` saying which paravirt backend to
-/// bring up: 0 = plain VM, 1 = TDX, ≥32 = SEV (C-bit position).
+/// [0, 4 GiB) identity-mapped, and `c_bit` ≥32 = SEV C-bit position
+/// (0 = plain VM).
 #[no_mangle]
-pub extern "C" fn rust64_start(tag: u32) -> ! {
-    if tag == 1 {
-        tdx::init();
-    } else if tag != 0 {
-        sev::init(tag);
+pub extern "C" fn rust64_start(c_bit: u32) -> ! {
+    if c_bit != 0 {
+        sev::init(c_bit);
         greq::init();
     }
 
@@ -53,9 +50,6 @@ pub extern "C" fn rust64_start(tag: u32) -> ! {
     serial::print("u2f-enclave: boot\n");
     if sev::active() {
         serial::print("u2f-enclave: SEV-SNP active, GHCB up\n");
-    }
-    if tdx::active() {
-        serial::print("u2f-enclave: TDX active, paravirt up\n");
     }
 
     let Some(vs) = vsock::init(VSOCK_PORT) else {
@@ -84,7 +78,7 @@ pub extern "C" fn rust64_start(tag: u32) -> ! {
 fn debug_exit(code: u32) -> ! {
     pv::outl(0xf4, code);
     loop {
-        pv::hlt();
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }
 }
 
