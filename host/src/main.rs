@@ -51,8 +51,9 @@ Usage:
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
   --sgx        run inside an SGX enclave instead of a VM; requires
-               /dev/sgx_enclave (work in progress)
-  GUEST_CID    AF_VSOCK context ID for the guest (default 42)
+               /dev/sgx_enclave
+  GUEST_CID    AF_VSOCK context ID for the guest (default 42; ignored
+               with --sgx)
   --vcek FILE  VCEK certificate (DER). Without it, verify looks in
                $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
                curl command to fetch it from AMD

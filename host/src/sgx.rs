@@ -7,8 +7,9 @@
 //! Refs: SDM Vol 3D ch 38–40; `arch/x86/include/{uapi/,}asm/sgx.h`; the
 //! kernel selftest in `tools/testing/selftests/sgx/`.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 
 use crate::kvm::ioc_raw;
 use crate::open_dev;
@@ -457,22 +458,48 @@ fn vdso_lookup() -> io::Result<usize> {
     ))
 }
 
-// --- entry point ---------------------------------------------------------
+// --- transport -----------------------------------------------------------
+
+/// Mailbox in untrusted memory; mirrors `Slot` in `sgx/src/main.rs`.
+#[repr(C)]
+struct Slot {
+    op: u32,
+    _pad: u32,
+    buf: [u8; 64],
+}
+const OP_INPUT: u32 = 1;
+const OP_DRAIN: u32 = 2;
 
 pub fn run(elf: &[u8]) -> io::Result<()> {
     let e = load(elf)?;
-    eprintln!(
-        "u2f-enclave: SGX EINIT ok (base={:#x}, {} KiB EPC)",
-        e.base,
-        e.size >> 10
-    );
-    let mut probe = 0u64;
-    e.enter(&mut probe as *mut u64 as u64)?;
-    if probe != 0x53475821 {
-        return Err(io::Error::other(format!(
-            "probe wrote {probe:#x}, not SGX!"
-        )));
+    eprintln!("u2f-enclave: SGX EINIT ok ({} KiB EPC)", e.size >> 10);
+
+    // Reuse the existing uhid pump unchanged: hand it one half of a
+    // socketpair, drive the enclave on the other.  Same wire format as the
+    // KVM/vsock and sim paths (raw 64-byte CTAPHID reports).
+    let (mut near, far) = UnixStream::pair()?;
+    let far_r = far.try_clone()?;
+    std::thread::spawn(move || {
+        if let Err(e) = bridge::serve(far_r, far) {
+            eprintln!("bridge: {e}");
+            std::process::exit(1);
+        }
+    });
+
+    let mut slot = Box::new(Slot {
+        op: 0,
+        _pad: 0,
+        buf: [0; 64],
+    });
+    let p = &mut *slot as *mut Slot as u64;
+    loop {
+        near.read_exact(&mut slot.buf)?;
+        slot.op = OP_INPUT;
+        e.enter(p)?;
+        while slot.op == 1 {
+            near.write_all(&slot.buf)?;
+            slot.op = OP_DRAIN;
+            e.enter(p)?;
+        }
     }
-    eprintln!("u2f-enclave: SGX EENTER ok (probe={probe:#x})");
-    Ok(())
 }

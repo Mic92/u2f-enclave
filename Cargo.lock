@@ -466,6 +466,10 @@ dependencies = [
 [[package]]
 name = "sgx"
 version = "0.0.1"
+dependencies = [
+ "ctap",
+ "linked_list_allocator",
+]
 
 [[package]]
 name = "sha2"

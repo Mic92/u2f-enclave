@@ -20,14 +20,19 @@ SECTIONS {
   . = ALIGN(4096);
   .text   : { *(.text .text.*)     } :text
   .rodata : { *(.rodata .rodata.*) } :text
+  /* Any address-in-data the linker can't make RIP-relative (vtables, GOT
+   * slots) ends up as R_X86_64_RELATIVE here; the entry stub applies them. */
+  .rela   : {
+    __rela_start = .; *(.rela.*); __rela_end = .;
+  } :text
   . = ALIGN(4096);
 
-  .data   : { *(.data .data.*) } :data
+  .data   : { *(.data .data.*) *(.got*) } :data
   .bss    : { *(.bss .bss.*)   } :data
   . = ALIGN(4096);
   .ssa    : { KEEP(*(.ssa))   } :data
   .stack  : { KEEP(*(.stack)) } :data
+  __encl_end = .;
 
-  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.dyn*) *(.gnu.hash) }
+  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.dynamic) *(.dynsym) *(.dynstr) *(.gnu.hash) *(.hash) *(.interp) }
 }
-ASSERT(!DEFINED(_GLOBAL_OFFSET_TABLE_), "GOT not supported in enclave")

@@ -7,12 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn cross(ws: &Path, out: &Path, krate: &str) {
+fn cross(ws: &Path, out: &Path, krate: &str, rustflags: &str) {
     let st = Command::new(std::env::var_os("CARGO").unwrap())
         .current_dir(ws)
         .env("CARGO_TARGET_DIR", out.join(format!("{krate}-target")))
-        .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env("RUSTFLAGS", rustflags)
         .args([
             "build",
             "-p",
@@ -38,7 +38,15 @@ fn main() {
         .unwrap()
         .to_path_buf();
 
-    cross(&ws, &out, "guest");
-    cross(&ws, &out, "sgx");
+    // The guest runs at its link address; the enclave does not, so it is
+    // built PIC + PIE and self-relocates.  RUSTFLAGS overrides the workspace
+    // `[target.*.rustflags]` entirely, so each build sees only its own model.
+    cross(&ws, &out, "guest", "-Crelocation-model=static");
+    cross(
+        &ws,
+        &out,
+        "sgx",
+        "-Crelocation-model=pic -Clink-arg=-pie -Clink-arg=--apply-dynamic-relocs",
+    );
     println!("cargo:rerun-if-changed={}", ws.join("ctap/src").display());
 }

@@ -18,24 +18,17 @@ fn libfido2_vmm() {
     fido2_roundtrip(&be.hidraw);
 }
 
-/// SGX bring-up: ECREATE→EADD→EEXTEND→SIGSTRUCT→EINIT→EENTER→EEXIT, no
-/// SDK, no .sgxs.  The enclave writes a marker through the host pointer;
-/// any divergence in MRENCLAVE/SIGSTRUCT/Q1Q2 makes EINIT reject before
-/// we get here, so a green run also covers the offline measurement.
+/// SGX backend; one EENTER per CTAPHID report each way.  Any divergence in
+/// MRENCLAVE/SIGSTRUCT/Q1Q2 makes EINIT reject before the bridge comes up,
+/// so a green run also covers the offline measurement.
 #[test]
-fn sgx_hello() {
+fn libfido2_sgx() {
     let _g = serial_guard();
-    if !have_sgx() {
+    if !need_writable("/dev/uhid") || !have_sgx() {
         return;
     }
-    let out = Command::new(host_bin("u2f-enclave"))
-        .arg("--sgx")
-        .output()
-        .unwrap();
-    let err = String::from_utf8_lossy(&out.stderr);
-    eprint!("{err}");
-    assert!(out.status.success(), "--sgx failed: {}", out.status);
-    assert!(err.contains("SGX EENTER ok"));
+    let be = vmm_backend("--sgx");
+    fido2_roundtrip(&be.hidraw);
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
