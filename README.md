@@ -133,8 +133,23 @@ If all three pass, the new credential's private key exists only inside
 an encrypted VM running this exact binary on a genuine AMD chip. There
 is no step four.
 
-`u2f-enclave verify` does checks 2 and 3 for you — pipe in the 1184
-bytes, get exit status 0 plus the `report_data` to compare:
+`u2f-enclave verify` does checks 2 and 3 for you. The 1184 bytes are
+`attStmt["snp"]` in the WebAuthn `attestationObject` your server gets
+from `navigator.credentials.create()`; whatever WebAuthn library you
+already use will hand you `attStmt` as a map. In Python, the whole
+relying-party check is:
+
+```python
+import cbor2, hashlib, subprocess, sys
+obj    = cbor2.loads(attestation_object)          # bytes from the browser
+report = obj["attStmt"]["snp"]                    # 1184-byte bstr
+r = subprocess.run(["u2f-enclave", "verify"], input=report,
+                   capture_output=True, text=True)
+bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
+ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
+```
+
+On the wire it looks like:
 
 ```console
 $ u2f-enclave verify < report.bin
@@ -148,11 +163,10 @@ $ echo $?
 0
 ```
 
-It fetches the VCEK from AMD's KDS (cached under `$XDG_CACHE_HOME`); for
-air-gapped use, pass `--vcek FILE`. Check 1 stays with you because you
-have `authData`/`clientDataHash` and the verifier doesn't — it's one
-SHA-512 in any language. Runs on any x86_64 Linux box; same binary, no
-AMD hardware needed. Source: `vmm/src/verify.rs` (~190 LoC).
+The VCEK is fetched from AMD's KDS once and cached under
+`$XDG_CACHE_HOME`; for air-gapped use, pass `--vcek FILE`. Runs on any
+x86_64 Linux box; same binary, no AMD hardware needed. Source:
+`vmm/src/verify.rs` (~190 LoC).
 
 **Why keys survive a restart:** the authenticator never stores its
 master secret. On every launch it asks the PSP to re-derive it from the
