@@ -57,8 +57,8 @@ Usage:
   --fresh      with --snp: discard prior state, generate a new master key
   --sgx        run inside an SGX enclave instead of a VM (no vsock);
                requires /dev/sgx_enclave
-  CID          AF_VSOCK context ID for the guest VM (default 42; ignored
-               with --sgx)
+  CID          AF_VSOCK context ID for the guest VM (default: pick a free
+               one); ignored with --sgx
   --vcek FILE  VCEK certificate (DER). Without it, verify looks in
                $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
                curl command to fetch it from AMD
@@ -97,8 +97,8 @@ fn main() -> io::Result<()> {
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();
     let fresh = snp && args.next_if_eq("--fresh").is_some();
-    let cid: u64 = match args.next().map(|s| s.parse()) {
-        None => 42,
+    let mut cid: u64 = match args.next().map(|s| s.parse()) {
+        None => 0,
         Some(Ok(n)) if !measure => n,
         _ => {
             eprint!("{USAGE}");
@@ -172,7 +172,11 @@ fn main() -> io::Result<()> {
     // vhost reads rings/buffers via the anon mmap; under SNP that is the
     // shared half of the memslot, so no special handling.
     let mut vsock = match vhost::Vhost::open(cid, mem as u64, MEM_SIZE as u64) {
-        Ok(v) => Some(mmio::VirtioVsock::new(v, cid)),
+        Ok((v, c)) => {
+            cid = c;
+            eprintln!("u2f-enclave: vsock cid={cid}");
+            Some(mmio::VirtioVsock::new(v, cid))
+        }
         Err(e) => {
             eprintln!(
                 "u2f-enclave: vhost-vsock unavailable ({e}); continuing without \

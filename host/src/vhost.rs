@@ -63,9 +63,15 @@ pub struct Vhost {
     mem_base: u64,
 }
 
+/// First CID the kernel will hand out (`> VMADDR_CID_HOST`).
+const CID_AUTO_BASE: u64 = 3;
+
 impl Vhost {
-    pub fn open(cid: u64, mem_uaddr: u64, mem_size: u64) -> io::Result<Self> {
-        let fd = std::fs::OpenOptions::new()
+    /// `cid = 0` probes for a free one so multiple instances (and the
+    /// short-lived donor VM during a key handover) coexist without the user
+    /// having to coordinate IDs.
+    pub fn open(cid: u64, mem_uaddr: u64, mem_size: u64) -> io::Result<(Self, u64)> {
+        let fd: OwnedFd = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/vhost-vsock")?
@@ -82,13 +88,30 @@ impl Vhost {
             flags_padding: 0,
         };
         ioctl_ref(&fd, VHOST_SET_MEM_TABLE, &mut mt)?;
-        let mut cid = cid;
-        ioctl_ref(&fd, VHOST_VSOCK_SET_GUEST_CID, &mut cid)?;
-        Ok(Self {
-            fd,
-            kick: [eventfd()?, eventfd()?],
-            mem_base: mem_uaddr,
-        })
+        let cid = if cid != 0 {
+            let mut c = cid;
+            ioctl_ref(&fd, VHOST_VSOCK_SET_GUEST_CID, &mut c)?;
+            cid
+        } else {
+            let mut c = CID_AUTO_BASE;
+            loop {
+                match ioctl_ref(&fd, VHOST_VSOCK_SET_GUEST_CID, &mut c) {
+                    Ok(_) => break c,
+                    Err(e) if e.kind() == io::ErrorKind::AddrInUse && c < CID_AUTO_BASE + 1024 => {
+                        c += 1
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        Ok((
+            Self {
+                fd,
+                kick: [eventfd()?, eventfd()?],
+                mem_base: mem_uaddr,
+            },
+            cid,
+        ))
     }
 
     /// Called when the guest sets QUEUE_READY for queue 0 or 1.

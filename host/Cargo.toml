@@ -16,6 +16,9 @@ ctap = { path = "../ctap" }
 vsock = "0.5"
 sha2 = "0.10"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+# `native-certs` so the system trust store (and SSL_CERT_FILE overrides)
+# applies — corporate proxies, custom CAs.  AMD KDS only; no other network.
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
 
 [build-dependencies]
 sha2 = "0.10"

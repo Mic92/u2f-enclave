@@ -15,9 +15,9 @@ pub fn verify_signature(r: &Report<'_>, vcek_der: &[u8]) -> Result<(), String> {
     verify_sig(r, &pk).map_err(String::from)
 }
 
-/// VCEK is per `(chip_id, reported_tcb)`, so it can't be baked in. Look in
-/// the cache; on miss, print the exact `curl` that populates it. Keeps an
-/// HTTP+TLS stack out of the binary for what is a once-per-chip fetch.
+/// VCEK is per `(chip_id, reported_tcb)`, so it can't be baked in.  Look in
+/// the cache; on miss, fetch from AMD KDS once and cache.  The handover path
+/// needs this unattended, so an HTTP client is worth the binary size.
 pub fn find_vcek(r: &Report<'_>) -> Result<Vec<u8>, String> {
     let dir = cache_dir();
     let cache = dir.join(format!(
@@ -28,13 +28,24 @@ pub fn find_vcek(r: &Report<'_>) -> Result<Vec<u8>, String> {
     if let Ok(b) = fs::read(&cache) {
         return Ok(b);
     }
+    let url = kds_url(r);
     let _ = fs::create_dir_all(&dir);
-    Err(format!(
-        "no VCEK for this chip/TCB. Fetch it once (or pass --vcek FILE):\n  \
-         curl -fsSo {} '{}'",
-        cache.display(),
-        kds_url(r),
-    ))
+    eprintln!("u2f-enclave: fetching VCEK → {}", cache.display());
+    let manual = || {
+        format!(
+            "\n  to supply it manually instead:  curl -fsSo {} '{url}'",
+            cache.display()
+        )
+    };
+    let mut buf = Vec::new();
+    ureq::get(&url)
+        .call()
+        .map_err(|e| format!("fetch {url}: {e}{}", manual()))?
+        .into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read {url}: {e}{}", manual()))?;
+    let _ = fs::write(&cache, &buf);
+    Ok(buf)
 }
 
 /// AMD KDS lookup URL. Product name from the report's cpuid (v3+); mapping

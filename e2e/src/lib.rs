@@ -248,9 +248,7 @@ pub fn vmm_backend(flags: &[&str]) -> Backend {
     let tmp = Tmp::new("host");
     let mut procs = Procs::default();
     let mut cmd = Command::new(host_bin("u2f-enclave"));
-    cmd.args(flags)
-        .arg("42")
-        .env("XDG_DATA_HOME", host_data_dir());
+    cmd.args(flags).env("XDG_DATA_HOME", host_data_dir());
     procs.spawn(&mut cmd);
     Backend {
         hidraw: find_hidraw(),
