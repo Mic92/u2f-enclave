@@ -161,13 +161,14 @@ fn seal_key() -> [u8; 16] {
             core::ptr::null_mut(),
         );
         assert_eq!(r, 0);
-        (*addr_of_mut!(OUT)).0
+        // `master` already holds a copy; don't leave a second one in .bss.
+        core::mem::take(&mut (*addr_of_mut!(OUT)).0)
     }
 }
 
-/// EREPORT for `attStmt["sgx"]`.  TARGETINFO is all-zero so the MAC is for a
-/// null target — the body (MRENCLAVE/MRSIGNER/ATTRIBUTES/REPORTDATA) is what
-/// the verifier reads, and a host-side QE wraps a fresh one for DCAP.
+/// EREPORT for `attStmt["sgx"]`.  TARGETINFO is all-zero so the MAC has no
+/// useful verifier; the body (MRENCLAVE/MRSIGNER/ATTRIBUTES/REPORTDATA) is
+/// what carries meaning.
 fn ereport(report_data: &[u8; 64]) -> [u8; 432] {
     static mut TI: A512<512> = A512([0; 512]);
     static mut RD: A128<64> = A128([0; 64]);

@@ -144,8 +144,8 @@ impl<P: Platform> Authenticator<P> {
                 hid::fragment(cid, hid::CTAPHID_CBOR, &resp)
             }
             hid::CTAPHID_CANCEL => Vec::new(),
-            // CTAP1 (`CTAPHID_MSG`) intentionally unsupported for now; we
-            // advertise CAPABILITY_NMSG so compliant clients won't try.
+            // CTAP1 (`CTAPHID_MSG`) intentionally unsupported; we advertise
+            // CAPABILITY_NMSG so compliant clients won't try.
             _ => hid::error(cid, hid::ERR_INVALID_CMD),
         }
     }

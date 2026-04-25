@@ -77,8 +77,12 @@ fn main() {
     // RSA-3072 e=3; the s³≡m check below rejects a wrong-exponent signer at
     // build time.
     let dflt = |f: &str| ws.join(f).to_string_lossy().into_owned();
-    let sign_cmd = std::env::var("U2FE_SGX_SIGN")
-        .unwrap_or_else(|_| format!("openssl dgst -sha256 -sign {}", dflt("sgx_key.pem")));
+    let sign_cmd = std::env::var("U2FE_SGX_SIGN").unwrap_or_else(|_| {
+        format!(
+            "openssl dgst -sha256 -sign {}",
+            sh_quote(&dflt("sgx_key.pem"))
+        )
+    });
     let pubkey = std::env::var("U2FE_SGX_PUBKEY").unwrap_or_else(|_| dflt("sgx_pub.pem"));
     println!("cargo:rerun-if-changed={pubkey}");
     println!("cargo:rerun-if-changed={}", dflt("sgx_key.pem"));
@@ -221,6 +225,10 @@ fn le384(x: &BigUint) -> [u8; MOD] {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // --- minimal SPKI / PKCS#1-public reader --------------------------------

@@ -21,7 +21,7 @@ const SGX_PAGE_MEASURE: u64 = 1;
 const ENCLU_EENTER: u32 = 2;
 const ENCLU_EEXIT: u32 = 4;
 
-/// Signed at build time from `$U2FE_SGX_KEY`; the private key never reaches
+/// Signed at build time via `$U2FE_SGX_SIGN`; the private key never reaches
 /// this binary, so the (untrusted) host cannot mint another SIGSTRUCT under
 /// the same MRSIGNER.
 pub static SIGSTRUCT: &[u8; 1808] = include_bytes!(concat!(env!("OUT_DIR"), "/sgx.sigstruct"));
