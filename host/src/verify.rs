@@ -1,68 +1,19 @@
-//! Relying-party side: parse an SNP attestation report, verify its VCEK
-//! signature, and check the measurement against this build's expected value.
-//! Host code, not in the TCB.
-//!
-//! Refs: SNP firmware ABI §7.3 (Table 22 report layout), AMD KDS spec.
+//! Relying-party side: `verify`/`vcek-url` subcommands.  Report layout and
+//! signature check live in `snp_report` (shared with the guest); this file
+//! is the std-only I/O around it.  Host code, not in the TCB.
 
 use std::path::PathBuf;
 use std::{env, fs, io, io::Read};
 
-use p384::ecdsa::signature::hazmat::PrehashVerifier;
-use p384::ecdsa::{Signature, VerifyingKey};
-use sha2::{Digest, Sha384};
+use crate::snp_report::{cert_p384_pubkey, verify_sig};
+pub use crate::snp_report::{Report, REPORT_LEN};
 
-pub const REPORT_LEN: usize = 1184;
-
-/// Borrowed view over a 1184-byte `ATTESTATION_REPORT`. Signature covers
-/// `[0..0x2a0]`.
-pub struct Report<'a>(pub &'a [u8; REPORT_LEN]);
-impl Report<'_> {
-    pub fn policy(&self) -> u64 {
-        u64::from_le_bytes(self.0[8..16].try_into().unwrap())
-    }
-    pub fn report_data(&self) -> &[u8] {
-        &self.0[0x50..0x90]
-    }
-    pub fn measurement(&self) -> &[u8] {
-        &self.0[0x90..0xc0]
-    }
-    pub fn reported_tcb(&self) -> u64 {
-        u64::from_le_bytes(self.0[0x180..0x188].try_into().unwrap())
-    }
-    pub fn chip_id(&self) -> &[u8] {
-        &self.0[0x1a0..0x1e0]
-    }
-    /// `r||s` big-endian. On-wire format is 72-byte LE-padded per component.
-    fn sig_be(&self) -> [u8; 96] {
-        let mut rs = [0u8; 96];
-        for (h, w) in [(0, 0x2a0), (48, 0x2a0 + 72)] {
-            rs[h..h + 48].copy_from_slice(&self.0[w..w + 48]);
-            rs[h..h + 48].reverse();
-        }
-        rs
-    }
-}
-
-/// Verify the report's ECDSA P-384 signature against the VCEK leaf cert.
-/// (ASK/ARK chain check would additionally prove the VCEK is AMD-issued; the
-/// HTTPS fetch already pins to AMD's endpoint.)
+/// Verify the report against a VCEK leaf cert (DER).  ASK/ARK chain is not
+/// checked: the HTTPS fetch already pins to AMD's endpoint, and the guest's
+/// own use of `verify_sig` pins by same-chip self-check instead.
 pub fn verify_signature(r: &Report<'_>, vcek_der: &[u8]) -> Result<(), String> {
-    let sig = Signature::from_slice(&r.sig_be()).map_err(|e| format!("bad signature: {e}"))?;
-    vcek_pubkey(vcek_der)?
-        .verify_prehash(&Sha384::digest(&r.0[..0x2a0]), &sig)
-        .map_err(|_| "VCEK signature on report does not verify".into())
-}
-
-/// Pull the SEC1 uncompressed point out of an x509 DER cert. VCEK certs
-/// always carry the EC pubkey as `BIT STRING(98){0x00, 0x04, x[48], y[48]}`;
-/// scanning for that header avoids a full x509 parser and is unambiguous for
-/// these fixed-shape AMD certs.
-fn vcek_pubkey(der: &[u8]) -> Result<VerifyingKey, String> {
-    let i = der
-        .windows(4)
-        .position(|w| w == [0x03, 0x62, 0x00, 0x04])
-        .ok_or("no P-384 SEC1 point in VCEK cert")?;
-    VerifyingKey::from_sec1_bytes(&der[i + 3..i + 100]).map_err(|e| format!("VCEK pubkey: {e}"))
+    let pk = cert_p384_pubkey(vcek_der).ok_or("no P-384 SEC1 point in VCEK cert")?;
+    verify_sig(r, &pk).map_err(String::from)
 }
 
 /// VCEK is per `(chip_id, reported_tcb)`, so it can't be baked in. Look in

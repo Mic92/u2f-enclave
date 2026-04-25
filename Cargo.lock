@@ -270,6 +270,8 @@ dependencies = [
  "aes-gcm",
  "ctap",
  "linked_list_allocator",
+ "p384",
+ "sha2",
 ]
 
 [[package]]

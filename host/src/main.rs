@@ -19,6 +19,7 @@ mod mmio;
 mod sgx;
 mod sgx_layout;
 mod snp;
+mod snp_report;
 mod verify;
 mod vhost;
 

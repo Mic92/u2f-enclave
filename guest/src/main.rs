@@ -21,6 +21,8 @@ mod platform;
 mod pv;
 mod serial;
 mod sev;
+#[path = "../../host/src/snp_report.rs"]
+mod snp_report;
 mod virtio;
 mod vsock;
 

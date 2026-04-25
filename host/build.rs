@@ -63,6 +63,10 @@ fn main() {
         "-Crelocation-model=pic -Clink-arg=-pie -Clink-arg=--apply-dynamic-relocs",
     );
     println!("cargo:rerun-if-changed={}", ws.join("ctap/src").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ws.join("host/src/snp_report.rs").display()
+    );
     println!("cargo:rerun-if-env-changed=U2FE_SGX_SIGN");
     println!("cargo:rerun-if-env-changed=U2FE_SGX_PUBKEY");
 
