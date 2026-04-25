@@ -63,31 +63,91 @@ fn main() {
         "-Crelocation-model=pic -Clink-arg=-pie -Clink-arg=--apply-dynamic-relocs",
     );
     println!("cargo:rerun-if-changed={}", ws.join("ctap/src").display());
-
-    let key_path = std::env::var("U2FE_SGX_KEY")
-        .unwrap_or_else(|_| ws.join("sgx_key.pem").to_string_lossy().into_owned());
-    println!("cargo:rerun-if-env-changed=U2FE_SGX_KEY");
-    println!("cargo:rerun-if-changed={key_path}");
-    let pem = std::fs::read(&key_path).unwrap_or_else(|e| {
-        panic!(
-            "\n\nSGX signing key not found at {key_path}: {e}.\n\
-             This key is the MRSIGNER identity that EGETKEY binds the seal key to;\n\
-             it must be private to the operator and is not checked in.  Generate one:\n\n  \
-               openssl genrsa -3 3072 > sgx_key.pem\n\n\
-             or point U2FE_SGX_KEY at an existing PEM.\n"
-        )
-    });
-    let (n, d) = parse_rsa_pem(&pem);
-    assert!(n.bits() >= 3071 && n.bits() <= 3072, "need RSA-3072");
+    println!("cargo:rerun-if-env-changed=U2FE_SGX_SIGN");
+    println!("cargo:rerun-if-env-changed=U2FE_SGX_PUBKEY");
 
     let elf = std::fs::read(&sgx_elf).unwrap();
     let (segs, img) = layout(&elf);
     let mre = mrenclave(&segs, &img);
-    let mrs: [u8; 32] = Sha256::digest(le384(&n)).into();
-    eprintln!("  sgx mrenclave {}", hex(&mre));
-    eprintln!("  sgx mrsigner  {}", hex(&mrs));
+    let (tbs, mut ss) = sigstruct_body(&mre);
 
-    std::fs::write(out.join("sgx.sigstruct"), sigstruct(&mre, &n, &d)).unwrap();
+    // Signing always goes through an external command so this process never
+    // touches the private key — the default just shells out to openssl with a
+    // local file, an HSM/TPM build overrides U2FE_SGX_SIGN.  EINIT mandates
+    // RSA-3072 e=3; the s³≡m check below rejects a wrong-exponent signer at
+    // build time.
+    let dflt = |f: &str| ws.join(f).to_string_lossy().into_owned();
+    let sign_cmd = std::env::var("U2FE_SGX_SIGN")
+        .unwrap_or_else(|_| format!("openssl dgst -sha256 -sign {}", dflt("sgx_key.pem")));
+    let pubkey = std::env::var("U2FE_SGX_PUBKEY").unwrap_or_else(|_| dflt("sgx_pub.pem"));
+    println!("cargo:rerun-if-changed={pubkey}");
+    println!("cargo:rerun-if-changed={}", dflt("sgx_key.pem"));
+
+    let n = pubkey_n(&std::fs::read(&pubkey).unwrap_or_else(|e| no_key(&pubkey, e)));
+    let s = sign_external(&sign_cmd, &tbs);
+    assert!(
+        n.bits() >= 3071 && n.bits() <= 3072,
+        "signer must be RSA-3072"
+    );
+    assert_eq!(
+        s.modpow(&BigUint::from(3u8), &n),
+        BigUint::from_bytes_be(&pkcs1v15_sha256(&tbs)),
+        "signature does not verify with e=3 (EINIT requires exponent 3)"
+    );
+    eprintln!("  sgx mrenclave {}", hex(&mre));
+    eprintln!("  sgx mrsigner  {}", hex(&Sha256::digest(le384(&n))));
+
+    // q1 = ⌊s²/n⌋, q2 = ⌊s·(s² mod n)/n⌋ — precomputed so the CPU can do
+    // s³ mod n with multiplies only during EINIT.
+    let s2 = &s * &s;
+    ss[128..128 + MOD].copy_from_slice(&le384(&n));
+    ss[512..516].copy_from_slice(&3u32.to_le_bytes());
+    ss[516..516 + MOD].copy_from_slice(&le384(&s));
+    ss[1040..1040 + MOD].copy_from_slice(&le384(&(&s2 / &n)));
+    ss[1424..1424 + MOD].copy_from_slice(&le384(&((&s * (&s2 % &n)) / &n)));
+    std::fs::write(out.join("sgx.sigstruct"), ss).unwrap();
+}
+
+/// Pipe the 256-byte payload to a shell command that performs
+/// RSASSA-PKCS1-v1_5-SHA256 and writes the raw 384-byte big-endian
+/// signature to stdout, e.g. `openssl dgst -sha256 -sign key.pem` or
+/// `pkcs11-tool --sign -m SHA256-RSA-PKCS …`.
+fn sign_external(cmd: &str, tbs: &[u8; 256]) -> BigUint {
+    use std::io::Write;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn U2FE_SGX_SIGN `{cmd}`: {e}"));
+    child.stdin.take().unwrap().write_all(tbs).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "U2FE_SGX_SIGN `{cmd}` exited {}",
+        out.status
+    );
+    assert_eq!(
+        out.stdout.len(),
+        MOD,
+        "U2FE_SGX_SIGN must write a raw 384-byte big-endian signature to stdout"
+    );
+    BigUint::from_bytes_be(&out.stdout)
+}
+
+fn no_key(path: &str, e: std::io::Error) -> ! {
+    panic!(
+        "\n\nSGX signing public key not found at {path}: {e}.\n\
+         The signer is the MRSIGNER identity EGETKEY binds the seal key to; it is\n\
+         per-operator and not checked in.  For a local file key:\n\n  \
+           openssl genrsa -3 3072 > sgx_key.pem\n  \
+           openssl rsa -in sgx_key.pem -pubout > sgx_pub.pem\n\n\
+         For a hardware token, set U2FE_SGX_SIGN to a command that reads the\n\
+         256-byte payload on stdin and writes a raw 384-byte RSASSA-PKCS1-v1_5\n\
+         SHA-256 signature to stdout, and U2FE_SGX_PUBKEY to its public key PEM.\n\
+         The key must be RSA-3072 with public exponent 3 (EINIT requirement).\n"
+    )
 }
 
 /// Reproduce the SHA-256 stream EINIT checks against MRENCLAVE: one 64-byte
@@ -119,7 +179,8 @@ fn mrenclave(segs: &[Seg], img: &[AlignedPage]) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn sigstruct(mre: &[u8; 32], n: &BigUint, d: &BigUint) -> [u8; SIGSTRUCT_LEN] {
+/// Unsigned SIGSTRUCT and the 256-byte payload the signature covers.
+fn sigstruct_body(mre: &[u8; 32]) -> ([u8; 256], [u8; SIGSTRUCT_LEN]) {
     let mut ss = [0u8; SIGSTRUCT_LEN];
     // header (SDM Table 38-19): magic constants, vendor=0, date=0.
     ss[0..16].copy_from_slice(&[6, 0, 0, 0, 0xe1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
@@ -130,14 +191,14 @@ fn sigstruct(mre: &[u8; 32], n: &BigUint, d: &BigUint) -> [u8; SIGSTRUCT_LEN] {
     ss[936..944].copy_from_slice(&XFRM_LEGACY.to_le_bytes());
     ss[944..952].copy_from_slice(&(ATTR_DEBUG | ATTR_MODE64BIT).to_le_bytes());
     ss[960..992].copy_from_slice(mre);
-
     // Signature is over header(128) ‖ body(128).
-    let mut payload = [0u8; 256];
-    payload[..128].copy_from_slice(&ss[0..128]);
-    payload[128..].copy_from_slice(&ss[900..1028]);
-    let digest: [u8; 32] = Sha256::digest(payload).into();
+    let mut tbs = [0u8; 256];
+    tbs[..128].copy_from_slice(&ss[0..128]);
+    tbs[128..].copy_from_slice(&ss[900..1028]);
+    (tbs, ss)
+}
 
-    // PKCS#1 v1.5: 00 01 FF.. 00 <DigestInfo(SHA-256)> <hash>, big-endian.
+fn pkcs1v15_sha256(tbs: &[u8]) -> [u8; MOD] {
     let mut em = [0xffu8; MOD];
     em[0] = 0;
     em[1] = 1;
@@ -147,27 +208,8 @@ fn sigstruct(mre: &[u8; 32], n: &BigUint, d: &BigUint) -> [u8; SIGSTRUCT_LEN] {
     ];
     em[MOD - 52] = 0;
     em[MOD - 51..MOD - 32].copy_from_slice(&DI);
-    em[MOD - 32..].copy_from_slice(&digest);
-
-    let m = BigUint::from_bytes_be(&em);
-    let s = m.modpow(d, n);
-    assert_eq!(
-        s.modpow(&BigUint::from(3u8), n),
-        m,
-        "U2FE_SGX_KEY: public exponent must be 3"
-    );
-    // q1 = ⌊s²/n⌋, q2 = ⌊s·(s² mod n)/n⌋ — precomputed so the CPU can do
-    // s³ mod n with multiplies only during EINIT.
-    let s2 = &s * &s;
-    let q1 = &s2 / n;
-    let q2 = (&s * (&s2 % n)) / n;
-
-    ss[128..128 + MOD].copy_from_slice(&le384(n));
-    ss[512..516].copy_from_slice(&3u32.to_le_bytes());
-    ss[516..516 + MOD].copy_from_slice(&le384(&s));
-    ss[1040..1040 + MOD].copy_from_slice(&le384(&q1));
-    ss[1424..1424 + MOD].copy_from_slice(&le384(&q2));
-    ss
+    em[MOD - 32..].copy_from_slice(&Sha256::digest(tbs));
+    em
 }
 
 fn le384(x: &BigUint) -> [u8; MOD] {
@@ -181,9 +223,9 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-// --- minimal PEM/PKCS#1/PKCS#8 reader -----------------------------------
+// --- minimal SPKI / PKCS#1-public reader --------------------------------
 
-fn parse_rsa_pem(pem: &[u8]) -> (BigUint, BigUint) {
+fn pubkey_n(pem: &[u8]) -> BigUint {
     let s = std::str::from_utf8(pem).expect("PEM utf8");
     let body: String = s
         .lines()
@@ -191,21 +233,15 @@ fn parse_rsa_pem(pem: &[u8]) -> (BigUint, BigUint) {
         .collect();
     let der = b64(body.as_bytes());
     let mut p = &der[..];
-    // PKCS#8 wraps PKCS#1 in SEQUENCE { version, AlgId, OCTET STRING { .. } };
-    // either way the innermost is PKCS#1 RSAPrivateKey ::= SEQUENCE { version,
-    // n, e, d, p, q, … }.
-    if s.contains("BEGIN PRIVATE KEY") {
-        p = der_tag(&mut p, 0x30); // enter outer SEQUENCE
-        der_tag(&mut p, 0x02); // version
-        der_tag(&mut p, 0x30); // AlgorithmIdentifier (skip)
-        p = der_tag(&mut p, 0x04); // enter OCTET STRING -> PKCS#1
+    if s.contains("BEGIN PUBLIC KEY") {
+        // SPKI: SEQUENCE { AlgId, BIT STRING { 0x00, RSAPublicKey } }
+        p = der_tag(&mut p, 0x30);
+        der_tag(&mut p, 0x30);
+        p = &der_tag(&mut p, 0x03)[1..]; // skip unused-bits octet
     }
-    p = der_tag(&mut p, 0x30); // enter RSAPrivateKey SEQUENCE
-    der_tag(&mut p, 0x02); // version
-    let n = BigUint::from_bytes_be(der_tag(&mut p, 0x02));
-    der_tag(&mut p, 0x02); // e (checked via s^3 ≡ m later)
-    let d = BigUint::from_bytes_be(der_tag(&mut p, 0x02));
-    (n, d)
+    // PKCS#1 RSAPublicKey ::= SEQUENCE { n, e }
+    p = der_tag(&mut p, 0x30);
+    BigUint::from_bytes_be(der_tag(&mut p, 0x02))
 }
 
 /// Read one DER TLV: assert tag, return value bytes, advance past it.

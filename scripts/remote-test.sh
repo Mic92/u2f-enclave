@@ -37,7 +37,7 @@ rsync -az --delete --info=stats1 \
   --exclude /target/ \
   --exclude '/result*' \
   --exclude /.direnv/ \
-  --exclude /sgx_key.pem \
+  --exclude '/sgx_*.pem' \
   "${ROOT}/" "${U2FE_HOST}:${U2FE_DIR}/"
 
 # The cluster has no libfido2 udev rule, so the uhid-created /dev/hidrawN
@@ -54,8 +54,9 @@ rsync -az --delete --info=stats1 \
   for d in /dev/uhid /dev/vhost-vsock /dev/sev /dev/sgx_enclave; do
     [[ -e \$d ]] && sudo -n setfacl -m u:\$(id -un):rw \$d
   done
-  # MRSIGNER private key is per-operator and never synced; CI generates one.
+  # MRSIGNER signing key is per-operator and never synced; CI generates one.
   [[ -e sgx_key.pem ]] || nix develop -c openssl genrsa -3 3072 2>/dev/null > sgx_key.pem
+  nix develop -c openssl rsa -in sgx_key.pem -pubout 2>/dev/null > sgx_pub.pem
   sudo -n bash -c '
     while :; do
       for h in /sys/class/hidraw/hidraw*; do
