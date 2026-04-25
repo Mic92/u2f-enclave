@@ -208,10 +208,6 @@ secret.
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
 
-No QEMU, no firmware, no IGVM, no `kvm-bindings`/`kvm-ioctls`, no SVSM
-protocol, no `#VC` handler/instruction decoder, no Intel SGX SDK or
-Fortanix runtime, no aesmd. RustCrypto for the crypto.
-
 ## Status
 
 - **CTAP** – CTAPHID, `getInfo`/`makeCredential`/`getAssertion` (ES256),
