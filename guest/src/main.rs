@@ -17,6 +17,7 @@ use linked_list_allocator::LockedHeap;
 
 mod boot;
 mod greq;
+mod handoff;
 mod platform;
 mod pv;
 mod seal;

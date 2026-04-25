@@ -159,8 +159,36 @@ fn libfido2_vmm_snp() {
     );
     drop(be);
 
-    // Third launch, `--fresh`: same credId must NOT resolve — proves the
-    // relaunch above succeeded via the file, not by accident.
+    // Pre-populate the VCEK cache so the handover doesn't hit KDS again.
+    let cdir = host_data_dir().join("u2f-enclave");
+    let _ = fs::create_dir_all(&cdir);
+    fs::copy(
+        &vcek,
+        cdir.join(format!(
+            "vcek-{}-{}.der",
+            hex(&rep[0x1a0..0x1a8]),
+            hex(&{
+                let mut t: [u8; 8] = rep[0x180..0x188].try_into().unwrap();
+                t.reverse();
+                t
+            })
+        )),
+    )
+    .unwrap();
+
+    // Forced unseal failure: host relaunches the previous guest from
+    // snp.state, both sides VCEK-verify each other, master moves via ECDH.
+    // Same binary plays both roles — author_key/chip/svn checks all hold.
+    let be = vmm_backend_env(&["--snp"], &[("U2FE_FORCE_HANDOFF", "1")]);
+    assert_eq!(
+        coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
+        0,
+        "credential lost across attested handover"
+    );
+    drop(be);
+
+    // `--fresh`: same credId must NOT resolve — proves the rounds above
+    // succeeded via the file/handover, not by accident.
     let be = vmm_backend(&["--snp", "--fresh"]);
     assert_ne!(
         coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),

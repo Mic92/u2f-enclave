@@ -166,7 +166,7 @@ pub fn which(bin: &str) -> PathBuf {
 }
 
 fn find_hidraw() -> PathBuf {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         for entry in fs::read_dir("/sys/class/hidraw")
             .into_iter()
@@ -187,7 +187,7 @@ fn find_hidraw() -> PathBuf {
             }
         }
         if Instant::now() > deadline {
-            panic!("hidraw device for u2f-enclave not found within 3s");
+            panic!("hidraw device for u2f-enclave not found within 15s");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -245,10 +245,19 @@ pub fn sim_backend() -> Backend {
 }
 
 pub fn vmm_backend(flags: &[&str]) -> Backend {
+    vmm_backend_env(flags, &[])
+}
+
+pub fn vmm_backend_env(flags: &[&str], envs: &[(&str, &str)]) -> Backend {
     let tmp = Tmp::new("host");
     let mut procs = Procs::default();
     let mut cmd = Command::new(host_bin("u2f-enclave"));
-    cmd.args(flags).env("XDG_DATA_HOME", host_data_dir());
+    cmd.args(flags)
+        .env("XDG_DATA_HOME", host_data_dir())
+        .env("XDG_CACHE_HOME", host_data_dir());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     procs.spawn(&mut cmd);
     Backend {
         hidraw: find_hidraw(),

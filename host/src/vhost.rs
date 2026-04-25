@@ -67,9 +67,8 @@ pub struct Vhost {
 const CID_AUTO_BASE: u64 = 3;
 
 impl Vhost {
-    /// `cid = 0` probes for a free one so multiple instances (and the
-    /// short-lived donor VM during a key handover) coexist without the user
-    /// having to coordinate IDs.
+    /// `cid = 0` probes for a free one so multiple instances coexist
+    /// without the user coordinating IDs.
     pub fn open(cid: u64, mem_uaddr: u64, mem_size: u64) -> io::Result<(Self, u64)> {
         let fd: OwnedFd = std::fs::OpenOptions::new()
             .read(true)

@@ -94,9 +94,12 @@ fn main() -> io::Result<()> {
     if args.next_if_eq("--sgx").is_some() {
         return sgx::run(SGX_ELF);
     }
+    // Internal: re-exec'd by `state::handoff` to run the previous guest from
+    // snp.state.  Never invoked by the user.
+    let donor = args.next_if_eq("--donor").is_some();
     let measure = args.next_if_eq("--measure").is_some();
-    let snp = !measure && args.next_if_eq("--snp").is_some();
-    let fresh = snp && args.next_if_eq("--fresh").is_some();
+    let snp = donor || (!measure && args.next_if_eq("--snp").is_some());
+    let fresh = snp && !donor && args.next_if_eq("--fresh").is_some();
     let mut cid: u64 = match args.next().map(|s| s.parse()) {
         None => 0,
         Some(Ok(n)) if !measure => n,
@@ -167,7 +170,19 @@ fn main() -> io::Result<()> {
         None
     };
 
-    let img = elf::load(GUEST_ELF, mem_slice)?;
+    let donor_st = if donor {
+        Some(
+            state::read(&state::path())?
+                .ok_or_else(|| io::Error::other("--donor: no snp.state"))?,
+        )
+    } else {
+        None
+    };
+    let guest_elf = donor_st.as_ref().map_or(GUEST_ELF, |s| &s.elf);
+    let (idb, ida) = donor_st
+        .as_ref()
+        .map_or((snp::ID_BLOCK, snp::ID_AUTH), |s| (&s.idb, &s.ida));
+    let img = elf::load(guest_elf, mem_slice)?;
 
     // vhost reads rings/buffers via the anon mmap; under SNP that is the
     // shared half of the memslot, so no special handling.
@@ -211,6 +226,8 @@ fn main() -> io::Result<()> {
             unsafe { (mem as *const u8).add(img.lo as usize) },
             img.lo,
             img.hi - img.lo,
+            idb,
+            ida,
         )?;
         eprintln!(
             "u2f-enclave: SEV-SNP launch ok ({} KiB measured)",
@@ -219,7 +236,14 @@ fn main() -> io::Result<()> {
     }
 
     if vsock.is_some() {
-        spawn_bridge(cid as u32, snp);
+        spawn_bridge(
+            cid as u32,
+            match &donor_st {
+                Some(s) => Role::Donor(s.sealed),
+                None if snp => Role::Snp,
+                None => Role::Plain,
+            },
+        );
     }
 
     loop {
@@ -244,6 +268,11 @@ fn main() -> io::Result<()> {
                     // busy-wait in serial::print falls through.
                     (p, kvm::IO_IN) if p == COM1 + 5 => unsafe {
                         std::ptr::write_bytes(data, 0x60, n)
+                    },
+                    // Donor guest is done; park so the relay thread can
+                    // drain vsock→stdout before the parent kills us.
+                    (DEBUG_EXIT, kvm::IO_OUT) if donor => loop {
+                        std::thread::park()
                     },
                     (DEBUG_EXIT, kvm::IO_OUT) => {
                         let code = unsafe { *(data as *const u32) };
@@ -311,7 +340,13 @@ fn main() -> io::Result<()> {
 /// Connect to the guest over AF_VSOCK and run the uhid loop. The guest is
 /// not listening yet when this is spawned (vCPU hasn't run), so retry until
 /// the connect succeeds.
-fn spawn_bridge(cid: u32, snp: bool) {
+enum Role {
+    Plain,
+    Snp,
+    Donor([u8; state::SEALED_LEN]),
+}
+
+fn spawn_bridge(cid: u32, role: Role) {
     std::thread::spawn(move || {
         let addr = vsock::VsockAddr::new(cid, 5555);
         let mut s = loop {
@@ -320,11 +355,13 @@ fn spawn_bridge(cid: u32, snp: bool) {
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
             }
         };
-        if snp {
-            if let Err(e) = state::prelude(&mut s) {
-                eprintln!("u2f-enclave: state: {e}");
-                std::process::exit(1);
-            }
+        if let Err(e) = match role {
+            Role::Plain => Ok(()),
+            Role::Snp => state::prelude(&mut s),
+            Role::Donor(sealed) => relay_exit(state::donor_relay(&mut s, &sealed)),
+        } {
+            eprintln!("u2f-enclave: state: {e}");
+            std::process::exit(1);
         }
         let r = s.try_clone().expect("vsock clone");
         if let Err(e) = bridge::serve(r, s) {
@@ -332,6 +369,17 @@ fn spawn_bridge(cid: u32, snp: bool) {
             std::process::exit(1);
         }
     });
+}
+
+fn relay_exit(r: io::Result<()>) -> ! {
+    if let Err(e) = r {
+        // Exit so the parent's pipe read EOFs instead of blocking forever.
+        eprintln!("u2f-enclave: donor relay: {e}");
+        std::process::exit(1);
+    }
+    loop {
+        std::thread::park() // parent kills us
+    }
 }
 
 /// Open a privileged device node with a hint at the fix on EACCES, since

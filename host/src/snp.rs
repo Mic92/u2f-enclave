@@ -121,8 +121,17 @@ impl Snp {
 
     /// `LAUNCH_START` → encrypt+measure `[gpa, gpa+len)` from `uaddr` →
     /// `LAUNCH_FINISH`. Call after `KVM_SET_{REGS,SREGS,CPUID2}` so the
-    /// VMSA picks them up.
-    pub fn launch(&self, vm: &OwnedFd, uaddr: *const u8, gpa: u64, len: u64) -> io::Result<()> {
+    /// VMSA picks them up.  `idb`/`ida` come from this build for the primary
+    /// guest and from `snp.state` for a relaunched donor.
+    pub fn launch(
+        &self,
+        vm: &OwnedFd,
+        uaddr: *const u8,
+        gpa: u64,
+        len: u64,
+        idb: &[u8; 96],
+        ida: &[u8; 4096],
+    ) -> io::Result<()> {
         debug_assert!(gpa & 0xfff == 0 && len & 0xfff == 0 && (uaddr as u64) & 0xfff == 0);
 
         sev_op(
@@ -145,8 +154,8 @@ impl Snp {
             &self.sev,
             KVM_SEV_SNP_LAUNCH_FINISH,
             &mut SnpLaunchFinish {
-                id_block_uaddr: ID_BLOCK.as_ptr() as u64,
-                id_auth_uaddr: ID_AUTH.as_ptr() as u64,
+                id_block_uaddr: idb.as_ptr() as u64,
+                id_auth_uaddr: ida.as_ptr() as u64,
                 id_block_en: 1,
                 auth_key_en: 1,
                 ..Default::default()
