@@ -1,7 +1,7 @@
 # Enclave design
 
 `x86_64-unknown-none` ELF that the `host` crate embeds and launches as a
-single-vCPU SEV-SNP guest. ~145 KB `.text`; the on-disk ELF is ~490 KB
+single-vCPU SEV-SNP guest. ~240 KB `.text`; the on-disk ELF is ~590 KB
 because `.bss`/`.stack` sit in PT_LOAD so they are part of the measured
 launch image.
 
@@ -116,17 +116,58 @@ PSP's signature transitively binds the credential public key, RP ID and
 this registration's challenge to the launch measurement. An SNP-aware
 relying party (`e2e/src/snp.rs`) checks `report_data`, fetches the VCEK
 for `(chip_id, reported_tcb)` from AMD KDS, verifies the P-384 signature,
-and matches `measurement` against an allow-list.
+and matches `measurement` against an expected value.
 
 ## Master secret
 
-`MSG_KEY_REQ` with `guest_field_select = policy|measurement` and the VCEK
-root: the PSP derives a 32-byte key from chip-unique material mixed with
-this binary's launch digest. Same binary on same silicon ⇒ same key, so
-credentials survive restarts with no sealed-storage protocol, no host-held
-blob, no network. A different binary (or a tampered host that alters the
-launch image) derives a different key and old credentials simply do not
-resolve — the persistence and the binding are the same mechanism.
+The master is 32 `RDRAND` bytes generated in the guest on first launch —
+not a derived value, because anything the PSP can derive is bound to the
+measurement and would change with every binary update. It is sealed under
+a key-encryption key from `MSG_KEY_REQ` (`guest_field_select =
+policy|measurement`, VCEK root): chip-unique material mixed with this
+binary's launch digest. The 60-byte AES-256-GCM blob is handed to the
+host, which writes it to `snp.state` together with the ELF and
+ID_BLOCK/ID_AUTH (so the donor side of a future handover can be
+relaunched bit-exact). On every boot the host sends the blob back; the
+guest re-derives the KEK, opens it, and reseals with a fresh nonce.
+
+The seal binds `author_key_digest` as AES-GCM AAD. Without that the host
+could launch the same ELF under an ID_BLOCK signed with its *own* key —
+the KEK is measurement-only so unsealing would still succeed — and the
+resulting donor would report the host's `author_key_digest`, matching a
+host-controlled recipient and leaking the master. With AAD bound, that
+donor's `open()` fails its tag check before it ever holds the plaintext.
+
+## Cross-version handover
+
+When `open()` fails (the binary changed), the host re-execs itself with
+`--donor`, launching the *old* ELF and ID_BLOCK from `snp.state` as a
+second SNP VM with a probed-free CID, and relays a fixed-count
+handshake between the two guests' vsocks via the donor's stdin/stdout.
+The host is a dumb pipe; every check that matters runs in encrypted
+memory.
+
+Each side generates an ephemeral P-256 key pair and a fresh PSP report
+with `report_data = SHA512(eph_pub)`. The host fetches the chip's VCEK
+from AMD KDS (or its cache) and forwards the 97-byte SEC1 public key.
+Each guest *self-pins* it: it verifies its **own** fresh report against
+the supplied key first — the real chip VCEK is the only key that signs
+that — so a forged key is rejected with no RSA-4096 ASK/ARK chain in
+the guest. With a pinned VCEK each side checks the peer's report:
+signature, `report_data == SHA512(peer_eph_pub)`, `author_key_en` and
+`author_key_digest` equals own, `policy.DEBUG` clear, `chip_id` equals
+own; the donor additionally requires the recipient's `guest_svn` ≥ its
+own so the host can't roll a fixed binary back onto an old vulnerable
+one. The 32-byte master then crosses under `AES-256-GCM(key =
+SHA256(ECDH_x ‖ recip_report ‖ donor_report), nonce = 0)` — the key is
+one-shot, and binding both full reports means a relayed-but-tampered
+field breaks the GCM tag even if a comparison were missed.
+
+The recipient drains every wire byte before returning any error so a
+failed verify can't leave a stray vsock packet for the CTAPHID loop. A
+failed handover (donor refused, peer verify failed, VCEK fetch failed)
+returns nonzero with `snp.state` untouched, so the user can retry; only
+`ST_HANDOFF_OK` rewrites the file with the recipient's reseal.
 
 ## Computing the measurement offline
 

@@ -64,12 +64,15 @@ loaded with `sev_snp=Y`:
 ```console
 $ sudo setfacl -m u:$USER:rw /dev/sev
 $ u2f-enclave --snp &
-u2f-enclave: SEV-SNP launch ok (492 KiB measured)
+u2f-enclave: vsock cid=3
+u2f-enclave: SEV-SNP launch ok (588 KiB measured)
+u2f-enclave: fresh SNP master key (no prior state)
+u2f-enclave: state → /home/alice/.local/share/u2f-enclave/snp.state
 u2f-enclave: ready at /dev/hidraw3
 ```
 
 Now the host cannot read the keys, every registration carries a signed
-attestation report, and keys survive restarts (see
+attestation report, and keys survive restarts and binary updates (see
 [Key persistence](#key-persistence)).
 
 ### Intel SGX
@@ -103,19 +106,14 @@ attest: cred_id      5e48c479276d74f3…
 `attest` stands in for a browser: it registers a credential over hidraw,
 checks the report is tied to it, and writes the 1184-byte report.
 
-Fetch the chip's AMD certificate (good until that chip's next microcode
-update; whichever side has network can do this):
-
-```console
-$ curl -o vcek.der "$(u2f-enclave vcek-url < report.bin)"
-```
-
 Verify — any Linux box with the same binary, no AMD hardware needed:
 
 ```console
-laptop$ u2f-enclave verify --vcek vcek.der < report.bin
+laptop$ u2f-enclave verify < report.bin
+u2f-enclave: fetching VCEK → /home/alice/.cache/u2f-enclave/vcek-f59a25d8….der
 report_data   6f020c9e5d1731ca…
-measurement   70eabebbf79908ce…  ok (matches this build)
+measurement   59a1f701254792c1…  = this build
+author_key    fdba2513c768b97b…  = this build's signer
 policy        0x30000  ok
 chip_id       f59a25d8302ed76a
 reported_tcb  0x581b00000000000a
@@ -124,9 +122,12 @@ laptop$ echo $?
 0
 ```
 
-Exit 0 means: a genuine AMD chip signed this, and what it measured
-matches what this binary would launch. `--measure` prints the
-measurement hex if you'd rather hard-code it; `--help` lists everything.
+Exit 0 means: a genuine AMD chip signed this, and what it measured — or
+the key that signed its launch — matches this binary. The chip's AMD
+certificate is fetched once and cached; pass `--vcek FILE` (or drop it
+at the printed path) on a machine without network. `--measure` prints
+the expected hexes if you'd rather hard-code them; `vcek-url` prints the
+fetch URL; `--help` lists everything.
 
 ## How attestation works
 
@@ -145,13 +146,15 @@ that report:
 2. **Signed by real AMD silicon?** AMD publishes a certificate (the
    *VCEK*) for every chip and firmware version. `vcek-url` builds the
    fetch URL from the report; verify the report's signature against it.
-3. **Running the code you audited?** `measurement` (bytes `0x90..0xc0`)
-   must match the build you reviewed. `--measure` computes that value;
-   the test suite checks it against a real chip. If the computation were
-   ever wrong you'd reject good reports, not accept bad ones.
+3. **Running the code you audited?** Either `measurement` (bytes
+   `0x90..0xc0`) matches the build you reviewed, or `author_key_digest`
+   (bytes `0x110..0x140`) matches your build-time signing key — the
+   first pins one exact binary, the second accepts any binary you
+   signed. `--measure` prints both; the test suite checks them against
+   a real chip.
 
 All three pass → the credential's private key exists only inside an
-encrypted VM running this exact binary on a genuine AMD chip.
+encrypted VM running code you signed on a genuine AMD chip.
 
 `verify` does 2 and 3; you do 1 (you have `authData`/`clientDataHash`,
 it doesn't). Your server gets the report as `attStmt["snp"]` in the
@@ -178,23 +181,39 @@ work.
 
 ## Key persistence
 
-The authenticator never stores its master secret. On every launch it
-asks the chip to re-derive it from a key burned into the silicon. No
-encrypted state files, no host-side storage, nothing to back up.
+Under **SEV-SNP** the master secret is 32 random bytes generated on the
+first run, then sealed (AES-256-GCM) and written to
+`$XDG_DATA_HOME/u2f-enclave/snp.state` together with the guest image
+and its signed launch block. The sealing key is what the AMD firmware
+derives from the chip's burned-in secret mixed with the launch
+measurement, so only this binary on this chip can open the file; the
+seal also binds your build-time signing key (see
+[Building](#building)), so a relaunch under anyone else's key can't
+open it either.
 
-Under **SEV-SNP** the chip mixes in the launch measurement: same binary
-on the same chip ⇒ same secret ⇒ credentials keep working across
-restarts; change either and old credentials stop resolving. The AMD
-firmware has no way to bind the derived key to a *signing key* instead,
-so a binary update means re-registering (or a one-time handoff between
-old and new — not built yet).
+On the next run the guest unseals and credentials keep working. After a
+binary update unsealing fails (different measurement); the new binary
+then briefly relaunches the *old* guest from `snp.state`, the two
+guests check each other's AMD-signed attestation reports (same chip,
+same signing key, no debug, new version ≥ old), and the old one hands
+the master across an encrypted channel. From the outside this is just a
+slightly slower start.
 
-Under **SGX** the chip mixes in the *signer* of the enclave (the
-build-time RSA key, see [Building](#building)) rather than the
-measurement. Any binary you sign with the same key on the same chip
-derives the same secret, so credentials survive code updates. Keep that
-key private: anyone who has it can sign an enclave that derives the same
-secret.
+The handover needs the chip's AMD certificate; it is fetched and cached
+automatically, or can be placed by hand on a machine without network
+(the error message gives the exact path and URL). `--fresh` discards
+`snp.state` and starts over with a new master.
+
+Anyone with `snp.state` *and* a binary signed with your key can run an
+authenticator with the same identity on the same chip. Keep both
+private — the file is created mode 0600.
+
+Under **SGX** the chip derives the master directly from a key burned
+into the silicon mixed with the *signer* of the enclave (the build-time
+RSA key). No state file: any binary you sign with the same key on the
+same chip derives the same secret, so credentials survive code updates.
+Keep that key private; anyone who has it can sign an enclave that
+derives the same secret.
 
 ## What's in the box
 
@@ -203,7 +222,7 @@ secret.
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
 | `guest`  | `no_std`          | SEV-SNP unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `host`. See [DESIGN.md](guest/DESIGN.md). |
 | `sgx`    | `no_std`          | SGX enclave: same `ctap` core, `EGETKEY` master, `EREPORT` attestation, asm entry stub with self-relocator and trust-boundary scrubbing. Cross-built, signed, and baked into `host`. |
-| `host`   | std (Linux)       | Builds the `u2f-enclave` binary: embeds the guest and enclave images, launches under KVM (`KVM_SEV_*`, guest_memfd, secrets-page) or `/dev/sgx_enclave` (hand-rolled loader, vDSO `EENTER`), runs the uhid bridge in-process; also `--measure`/`verify`/`attest`/`vcek-url`. The build script computes MRENCLAVE and signs SIGSTRUCT. |
+| `host`   | std (Linux)       | Builds the `u2f-enclave` binary: embeds the guest and enclave images, launches under KVM (`KVM_SEV_*`, guest_memfd, secrets-page) or `/dev/sgx_enclave` (hand-rolled loader, vDSO `EENTER`), runs the uhid bridge in-process; orchestrates the key handover; also `--measure`/`verify`/`attest`/`vcek-url`. The build script computes MRENCLAVE and the SNP launch digest and signs SIGSTRUCT and ID_BLOCK. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `host` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
@@ -218,24 +237,31 @@ secret.
 - **SGX** – hand-rolled loader/signer/vDSO call, `EGETKEY` signer-bound
   master key (survives updates), `EREPORT` in `attStmt`.
 - **Attestation** – SNP report in `attStmt`, VCEK signature verified,
-  measurement stable and offline-recomputable; SGX MRENCLAVE/MRSIGNER
-  recomputable.
-- **Next** – SGX DCAP Quote + `verify` arm; SNP cross-version key
-  handoff; resident keys / `clientPIN`.
+  measurement and `author_key_digest` stable and offline-recomputable;
+  SGX MRENCLAVE/MRSIGNER recomputable.
+- **Persistence** – SNP: sealed `snp.state`, attested cross-version
+  handover with downgrade refusal. SGX: signer-bound `EGETKEY`.
+- **Next** – SGX DCAP Quote + `verify` arm; resident keys / `clientPIN`.
 
 ## Building
 
-The build signs the SGX enclave, so it needs an RSA-3072 key with public
-exponent 3 (an Intel hardware requirement). The build never reads the
+The build signs both backends: the SGX enclave (RSA-3072 with public
+exponent 3 — an Intel hardware requirement) and the SEV-SNP launch
+block (ECDSA P-384 — an AMD firmware requirement). The SGX signer
+becomes `MRSIGNER`; the SNP signer becomes `author_key_digest` in every
+report. Both are what [Key persistence](#key-persistence) and
+[check 3](#how-attestation-works) hinge on. The build never reads a
 private key itself — it shells out to a signer command — so the same
 path works for a local file or a hardware token.
 
-Local file key (default; `sgx_key.pem`/`sgx_pub.pem` are git-ignored):
+Local file keys (default; `*_key.pem`/`*_pub.pem` are git-ignored):
 
 ```bash
 nix develop          # rust toolchain with x86_64-unknown-none + libfido2 + openssl
 openssl genrsa -3 3072 > sgx_key.pem
 openssl rsa -in sgx_key.pem -pubout > sgx_pub.pem
+openssl ecparam -name secp384r1 -genkey -noout > snp_key.pem
+openssl ec -in snp_key.pem -pubout > snp_pub.pem
 cargo build --release -p host    # → target/release/u2f-enclave
 cargo test                       # unit + e2e (libfido2, OpenSSH, attestation)
 ```
@@ -246,12 +272,17 @@ e=3; YubiKey PIV and the cloud KMS services cannot, they fix e=65537):
 ```bash
 export U2FE_SGX_PUBKEY=/path/to/signer_pub.pem
 export U2FE_SGX_SIGN='pkcs11-tool --sign -m SHA256-RSA-PKCS --id 01 --module …'
+export U2FE_SNP_PUBKEY=/path/to/snp_pub.pem
+export U2FE_SNP_SIGN='pkcs11-tool --sign -m ECDSA-SHA384 --id 02 --module …'
 cargo build --release -p host
 ```
 
 `$U2FE_SGX_SIGN` reads the 256-byte payload on stdin and writes the raw
-384-byte signature to stdout. The build verifies the signature with e=3
-and fails early if the token used a different exponent.
+384-byte signature to stdout; `$U2FE_SNP_SIGN` reads the payload and
+writes a DER ECDSA signature. The build verifies both against the
+public keys and fails early on a mismatch. ECDSA signatures are not
+deterministic, so two builds of the same source with the same keys are
+functionally identical but not byte-identical.
 
 Tests that need `/dev/kvm`, `/dev/uhid`, `/dev/vhost-vsock` or `/dev/sev`
 print `SKIP` and pass if those are not writable. No-KVM dev loop:
