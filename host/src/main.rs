@@ -30,10 +30,10 @@ static GUEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest"));
 static SGX_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sgx"));
 
 const USAGE: &str = "\
-FIDO2/CTAP2 authenticator running as a confidential VM.
+FIDO2/CTAP2 authenticator running in a confidential VM or SGX enclave.
 
 Usage:
-  u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
+  u2f-enclave [--snp|--sgx] [CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
   u2f-enclave --measure              print this build's SNP launch digest
                                      and SGX MRENCLAVE/MRSIGNER and exit
@@ -51,9 +51,9 @@ Usage:
                                      `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
-  --sgx        run inside an SGX enclave instead of a VM; requires
-               /dev/sgx_enclave
-  GUEST_CID    AF_VSOCK context ID for the guest (default 42; ignored
+  --sgx        run inside an SGX enclave instead of a VM (no vsock);
+               requires /dev/sgx_enclave
+  CID          AF_VSOCK context ID for the guest VM (default 42; ignored
                with --sgx)
   --vcek FILE  VCEK certificate (DER). Without it, verify looks in
                $XDG_CACHE_HOME/u2f-enclave and, on miss, prints the
@@ -61,9 +61,10 @@ Usage:
 
 --measure and verify need no /dev/* access and run on any x86_64 Linux.
 
-Needs rw access to /dev/kvm, /dev/uhid, /dev/vhost-vsock and (with --snp)
-/dev/sev. One-time setup:
-  sudo setfacl -m u:$USER:rw /dev/kvm /dev/uhid /dev/vhost-vsock /dev/sev
+Needs rw access to /dev/uhid plus, depending on mode, /dev/kvm +
+/dev/vhost-vsock, /dev/sev, or /dev/sgx_enclave. One-time setup:
+  sudo setfacl -m u:$USER:rw /dev/uhid /dev/kvm /dev/vhost-vsock \
+                             /dev/sev /dev/sgx_enclave
 ";
 
 fn main() -> io::Result<()> {

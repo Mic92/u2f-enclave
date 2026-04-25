@@ -1,11 +1,12 @@
 # u2f-enclave
 
-A FIDO2/CTAP2 authenticator that runs as its own **confidential VM** (AMD
-SEV-SNP) instead of as a USB dongle. Private keys never leave VM-encrypted
-memory; the consumer talks to it over **vsock** and sees a normal
-`/dev/hidraw` FIDO device via a tiny uhid bridge. Every `makeCredential`
-carries an **SNP attestation report** that binds the new credential's
-public key to the launch measurement of this exact binary.
+A FIDO2/CTAP2 authenticator that runs inside a hardware-isolated
+environment — an **AMD SEV-SNP** confidential VM or an **Intel SGX**
+enclave — instead of as a USB dongle. Private keys never leave
+CPU-encrypted memory; the consumer sees a normal `/dev/hidraw` FIDO
+device via a tiny uhid bridge. Every `makeCredential` carries a
+hardware **attestation report** that binds the new credential's public
+key to the exact code that holds it.
 
 Open re-implementation of the idea behind *Hardware Authenticator Binding*
 (Shiraishi & Shinagawa, COMPSAC 2025), built from scratch to keep the
@@ -17,15 +18,15 @@ trusted code small rather than forked from an existing firmware stack.
 > your own risk.
 
 ```
-┌──────────── consumer VM ───────────┐      ┌──── authenticator CVM (SEV-SNP) ───┐
-│ browser → libfido2 → /dev/hidrawN  │      │                                    │
-│                       ▲            │      │   ┌──────────────────────────┐     │
-│                  uhid │            │      │   │  ctap (no_std)           │     │
-│                ┌──────┴─────┐ vsock│◄────►│   │  CTAPHID + CTAP2 + keys  │     │
-│                │  bridge    │──────┼──────┼──►│                          │     │
-│                └────────────┘      │      │   └──────────────────────────┘     │
-└────────────────────────────────────┘      │   SNP attestation report → attStmt │
-                                            └────────────────────────────────────┘
+┌────────────── consumer ─────────────┐      ┌────── SEV-SNP VM / SGX enclave ────┐
+│ browser → libfido2 → /dev/hidrawN   │      │                                    │
+│                       ▲             │      │   ┌──────────────────────────┐     │
+│                  uhid │             │      │   │  ctap (no_std)           │     │
+│                ┌──────┴─────┐       │◄────►│   │  CTAPHID + CTAP2 + keys  │     │
+│                │  bridge    │───────┼──────┼──►│                          │     │
+│                └────────────┘       │      │   └──────────────────────────┘     │
+└─────────────────────────────────────┘      │   hardware attestation → attStmt   │
+                                             └────────────────────────────────────┘
 ```
 
 ## Usage
@@ -51,11 +52,11 @@ Generating public/private ecdsa-sk key pair.
 ...
 ```
 
-Without `--snp` the guest runs as a plain KVM VM — functionally complete
-and fine for development, but the host kernel is in the trust boundary
-and keys do not survive a restart.
+Without `--snp` or `--sgx` the guest runs as a plain KVM VM —
+functionally complete and fine for development, but the host kernel is
+in the trust boundary and keys do not survive a restart.
 
-### Hardware-bound mode (SEV-SNP)
+### AMD SEV-SNP
 
 On an EPYC host (Milan or later) with SNP enabled in BIOS and `kvm_amd`
 loaded with `sev_snp=Y`:
@@ -70,6 +71,22 @@ u2f-enclave: ready at /dev/hidraw3
 Now the host cannot read the keys, every registration carries a signed
 attestation report, and keys survive restarts (see
 [Key persistence](#key-persistence)).
+
+### Intel SGX
+
+On an Intel host with SGX and Flexible Launch Control (Ice Lake or
+later, `CONFIG_X86_SGX=y`):
+
+```console
+$ sudo setfacl -m u:$USER:rw /dev/sgx_enclave
+$ u2f-enclave --sgx &
+u2f-enclave: SGX EINIT ok (512 KiB EPC)
+u2f-enclave: ready at /dev/hidraw3
+```
+
+No VM, no vsock; the host process loads the enclave directly and
+shuttles 64-byte HID reports in and out via `EENTER`. Every registration
+carries an SGX report binding it to the enclave's measurement and signer.
 
 ### See the attestation
 
@@ -151,28 +168,49 @@ bound = hashlib.sha512(obj["authData"] + client_data_hash).hexdigest()
 ok = r.returncode == 0 and f"report_data   {bound}" in r.stdout
 ```
 
+On Intel, `attStmt["sgx"]` is the 432-byte SGX report. Its `REPORTDATA`
+field (bytes `0x140..0x180`) carries the same SHA-512 binding as check
+1; `MRENCLAVE` (bytes `0x40..0x60`) and `MRSIGNER` (bytes `0x80..0xa0`)
+are what `--measure` prints. The raw report is locally checkable but
+not remotely verifiable on its own — wrapping it as a DCAP Quote (so a
+remote party can verify Intel's signature chain) is the next piece of
+work.
+
 ## Key persistence
 
 The authenticator never stores its master secret. On every launch it
-asks the chip to re-derive it from a key burned into the silicon plus
-the launch measurement. Same binary on the same chip ⇒ same secret ⇒
-credentials keep working across restarts; change either and old
-credentials stop resolving. No encrypted state files, no host-side
-storage, nothing to back up.
+asks the chip to re-derive it from a key burned into the silicon. No
+encrypted state files, no host-side storage, nothing to back up.
+
+Under **SEV-SNP** the chip mixes in the launch measurement: same binary
+on the same chip ⇒ same secret ⇒ credentials keep working across
+restarts; change either and old credentials stop resolving. The AMD
+firmware has no way to bind the derived key to a *signing key* instead,
+so a binary update means re-registering (or a one-time handoff between
+old and new — not built yet).
+
+Under **SGX** the chip mixes in the *signer* of the enclave (the
+build-time RSA key, see [Building](#building)) rather than the
+measurement. Any binary you sign with the same key on the same chip
+derives the same secret, so credentials survive code updates. Keep that
+key private: anyone who has it can sign an enclave that derives the same
+secret.
 
 ## What's in the box
 
 | crate    | target            | purpose                                                            |
 | -------- | ----------------- | ------------------------------------------------------------------ |
 | `ctap`   | `no_std` + alloc  | CTAPHID framing, CTAP2 commands, credential logic. Platform-agnostic, unit-tested on the host. |
-| `guest`  | `no_std`          | The unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `host`. See [DESIGN.md](guest/DESIGN.md). |
-| `host`   | std (Linux)       | Builds the `u2f-enclave` binary: embeds the guest ELF, launches it under KVM (`KVM_SEV_*`, guest_memfd, secrets-page), wires its virtqueues to `/dev/vhost-vsock`, runs the uhid bridge in-process; also the `--measure`/`verify`/`attest`/`vcek-url` subcommands. |
+| `guest`  | `no_std`          | SEV-SNP unikernel: PVH boot, paravirt GHCB (IOIO/MMIO/PSC/guest-request — no `#VC` handler), hand-rolled virtio-vsock, PSP attestation + derived-key. Cross-built and baked into `host`. See [DESIGN.md](guest/DESIGN.md). |
+| `sgx`    | `no_std`          | SGX enclave: same `ctap` core, `EGETKEY` master, `EREPORT` attestation, asm entry stub with self-relocator and trust-boundary scrubbing. Cross-built, signed, and baked into `host`. |
+| `host`   | std (Linux)       | Builds the `u2f-enclave` binary: embeds the guest and enclave images, launches under KVM (`KVM_SEV_*`, guest_memfd, secrets-page) or `/dev/sgx_enclave` (hand-rolled loader, vDSO `EENTER`), runs the uhid bridge in-process; also `--measure`/`verify`/`attest`/`vcek-url`. The build script computes MRENCLAVE and signs SIGSTRUCT. |
 | `bridge` | std (Linux)       | Consumer-side daemon: connects to the authenticator socket and exposes it as a HID device via `/dev/uhid`. Standalone for the cross-VM case; linked into `host` for the local case. |
 | `sim`    | std (Linux/macOS) | Runs `ctap` over a Unix socket so the full stack can be exercised without KVM/SEV hardware. |
 | `e2e`    | std               | Integration tests: drive `libfido2`, OpenSSH and `u2f-enclave verify` against the running binary. |
 
 No QEMU, no firmware, no IGVM, no `kvm-bindings`/`kvm-ioctls`, no SVSM
-protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
+protocol, no `#VC` handler/instruction decoder, no Intel SGX SDK or
+Fortanix runtime, no aesmd. RustCrypto for the crypto.
 
 ## Status
 
@@ -181,17 +219,43 @@ protocol, no `#VC` handler/instruction decoder. RustCrypto for the crypto.
   OpenSSH `sk-ecdsa`.
 - **SEV-SNP** – encrypted+measured launch, paravirt GHCB, virtio over shared
   rings, guest↔PSP messaging.
-- **Attestation** – report in `attStmt`, VCEK signature verified, measurement
-  stable and offline-recomputable, master key persists.
-- **Next** – resident keys / `clientPIN`; Intel SGX backend.
+- **SGX** – hand-rolled loader/signer/vDSO call, `EGETKEY` signer-bound
+  master key (survives updates), `EREPORT` in `attStmt`.
+- **Attestation** – SNP report in `attStmt`, VCEK signature verified,
+  measurement stable and offline-recomputable; SGX MRENCLAVE/MRSIGNER
+  recomputable.
+- **Next** – SGX DCAP Quote + `verify` arm; SNP cross-version key
+  handoff; resident keys / `clientPIN`.
 
 ## Building
 
+The build signs the SGX enclave, so it needs an RSA-3072 key with public
+exponent 3 (an Intel hardware requirement). The build never reads the
+private key itself — it shells out to a signer command — so the same
+path works for a local file or a hardware token.
+
+Local file key (default; `sgx_key.pem`/`sgx_pub.pem` are git-ignored):
+
 ```bash
-nix develop          # rust toolchain with x86_64-unknown-none + libfido2
+nix develop          # rust toolchain with x86_64-unknown-none + libfido2 + openssl
+openssl genrsa -3 3072 > sgx_key.pem
+openssl rsa -in sgx_key.pem -pubout > sgx_pub.pem
 cargo build --release -p host    # → target/release/u2f-enclave
-cargo test                        # unit + e2e (libfido2, OpenSSH, attestation)
+cargo test                       # unit + e2e (libfido2, OpenSSH, attestation)
 ```
+
+Hardware token (PKCS#11 HSM, TPM 2.0 — anything that can do RSA-3072
+e=3; YubiKey PIV and the cloud KMS services cannot, they fix e=65537):
+
+```bash
+export U2FE_SGX_PUBKEY=/path/to/signer_pub.pem
+export U2FE_SGX_SIGN='pkcs11-tool --sign -m SHA256-RSA-PKCS --id 01 --module …'
+cargo build --release -p host
+```
+
+`$U2FE_SGX_SIGN` reads the 256-byte payload on stdin and writes the raw
+384-byte signature to stdout. The build verifies the signature with e=3
+and fails early if the token used a different exponent.
 
 Tests that need `/dev/kvm`, `/dev/uhid`, `/dev/vhost-vsock` or `/dev/sev`
 print `SKIP` and pass if those are not writable. No-KVM dev loop:
@@ -202,5 +266,6 @@ print `SKIP` and pass if those are not writable. No-KVM dev loop:
 - CTAP 2.1 spec: <https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html>
 - AMD GHCB spec rev 2.03: <https://www.amd.com/system/files/TechDocs/56421.pdf>
 - AMD SEV-SNP firmware ABI: <https://www.amd.com/system/files/TechDocs/56860.pdf>
+- Intel SDM Vol. 3D ch. 38–40 (SGX): <https://www.intel.com/sdm>
 - COCONUT-SVSM (SEV-SNP guest reference, MIT): <https://github.com/coconut-svsm/svsm>
 - `sev-snp-measure` (offline measurement reference): <https://github.com/virtee/sev-snp-measure>
