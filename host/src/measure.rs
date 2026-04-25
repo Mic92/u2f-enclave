@@ -9,7 +9,24 @@
 
 use sha2::{Digest, Sha384};
 
-use crate::snp::C_BIT;
+// Launch ABI constants live here so build.rs can `#[path]`-include this
+// module standalone (it needs them to fill the signed ID_BLOCK).
+
+/// The C-bit position is part of the measured initial register state
+/// (rsi in the VMSA), so a per-host value would make the measurement
+/// host-dependent.  Pin it to 51 (Milan/Genoa/Turin); `snp.rs` checks the
+/// host CPU agrees at launch time.
+pub const C_BIT: u32 = 51;
+/// Fixed GPA for the secrets page; matches `guest/src/greq.rs`.
+pub const SECRETS_GPA: u64 = 0x1000;
+/// Bit 17 must be set; bit 16 (SMT) must be set on SMT hosts or the PSP
+/// rejects the launch (`SNP_POLICY_MASK_RSVD_MBO`/`_SMT`).
+pub const SNP_POLICY: u64 = (1 << 17) | (1 << 16);
+/// `guest_svn` for the signed ID_BLOCK; ends up in every report.  Bump on a
+/// release that fixes a key-relevant bug — it's the only monotonic version
+/// signal a peer guest sees.
+#[allow(dead_code)] // referenced via build.rs's #[path] include
+pub const GUEST_SVN: u32 = 1;
 
 pub const VMSA_GPA: u64 = 0xFFFF_FFFF_F000;
 

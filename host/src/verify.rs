@@ -126,19 +126,24 @@ pub fn cmd(vcek_path: Option<String>, expected: [u8; 48]) -> i32 {
     };
     // Compare against what *this binary* computes for its own guest image.
     // If the computation is wrong we reject good reports; we can't accept a
-    // bad one because the PSP only signs what it actually measured.
+    // bad one because the PSP only signs what it actually measured.  The
+    // author-key arm lets a verifier built from one release accept reports
+    // from another, as long as the same operator key signed both.
     let meas_ok = r.measurement() == expected;
+    let akd_ok = r.author_key_en() && r.author_key_digest() == crate::snp::AUTHOR_KEY_DIGEST;
     let pol_ok = r.policy() == crate::snp::SNP_POLICY;
 
+    let tag = |b, s| if b { s } else { "" };
     println!("report_data   {}", hex(r.report_data()));
     println!(
         "measurement   {}  {}",
         hex(r.measurement()),
-        if meas_ok {
-            "ok (matches this build)"
-        } else {
-            "FAIL"
-        }
+        tag(meas_ok, "= this build")
+    );
+    println!(
+        "author_key    {}  {}",
+        hex(r.author_key_digest()),
+        tag(akd_ok, "= this build's signer")
     );
     println!("policy        {:#x}  {}", r.policy(), ok(pol_ok));
     println!("chip_id       {}", hex(&r.chip_id()[..8]));
@@ -146,7 +151,11 @@ pub fn cmd(vcek_path: Option<String>, expected: [u8; 48]) -> i32 {
     println!("vcek_sig      {}", ok(sig_ok));
     eprintln!("verify: caller must also check report_data == SHA-512(authData || clientDataHash)");
 
-    if sig_ok && meas_ok && pol_ok {
+    let pass = sig_ok && (meas_ok || akd_ok) && pol_ok;
+    if !meas_ok && !akd_ok {
+        eprintln!("verify: neither measurement nor author_key_digest match this build");
+    }
+    if pass {
         0
     } else {
         1

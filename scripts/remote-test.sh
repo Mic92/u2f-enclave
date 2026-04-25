@@ -38,6 +38,7 @@ rsync -az --delete --info=stats1 \
   --exclude '/result*' \
   --exclude /.direnv/ \
   --exclude '/sgx_*.pem' \
+  --exclude '/snp_*.pem' \
   "${ROOT}/" "${U2FE_HOST}:${U2FE_DIR}/"
 
 # The cluster has no libfido2 udev rule, so the uhid-created /dev/hidrawN
@@ -57,6 +58,8 @@ rsync -az --delete --info=stats1 \
   # MRSIGNER signing key is per-operator and never synced; CI generates one.
   [[ -e sgx_key.pem ]] || nix develop -c openssl genrsa -3 3072 2>/dev/null > sgx_key.pem
   nix develop -c openssl rsa -in sgx_key.pem -pubout 2>/dev/null > sgx_pub.pem
+  [[ -e snp_key.pem ]] || nix develop -c openssl ecparam -name secp384r1 -genkey -noout 2>/dev/null > snp_key.pem
+  nix develop -c openssl ec -in snp_key.pem -pubout 2>/dev/null > snp_pub.pem
   sudo -n bash -c '
     while :; do
       for h in /sys/class/hidraw/hidraw*; do

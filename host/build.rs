@@ -1,20 +1,27 @@
-//! Cross-build the bare-metal payloads, then **sign** the SGX one.
+//! Cross-build the bare-metal payloads, then **sign** them.
 //!
-//! SIGSTRUCT is computed here so the binary embeds only the signed blob and
-//! never the RSA private key: the build machine is the signer, the host that
-//! later runs `--sgx` is the adversary, and `EGETKEY(MRSIGNER)` binds the
-//! enclave's seal key to this signer.  A separate `CARGO_TARGET_DIR` under
-//! `OUT_DIR` keeps the inner cargo from contending on the outer build's lock.
+//! SGX SIGSTRUCT and SNP ID_BLOCK/ID_AUTH are computed here so the binary
+//! embeds only the signed blobs and never a private key: the build machine
+//! is the signer, the host that runs `--sgx`/`--snp` is the adversary.  SGX
+//! binds the seal key to this signer (`EGETKEY(MRSIGNER)`); SNP stamps it
+//! into every report (`author_key_digest`).  A separate `CARGO_TARGET_DIR`
+//! under `OUT_DIR` keeps the inner cargo from contending on the outer
+//! build's lock.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use num_bigint::BigUint;
-use sha2::{Digest, Sha256};
+use p384::ecdsa::signature::hazmat::PrehashVerifier;
+use sha2::{Digest, Sha256, Sha384};
 
 #[path = "src/sgx_layout.rs"]
 mod sgx_layout;
 use sgx_layout::*;
+#[path = "src/elf.rs"]
+mod elf;
+#[path = "src/measure.rs"]
+mod measure;
 
 const MOD: usize = 384; // RSA-3072
 const SIGSTRUCT_LEN: usize = 1808;
@@ -55,7 +62,7 @@ fn main() {
     // The guest runs at its link address; the enclave does not, so it is
     // built PIC + PIE and self-relocates.  RUSTFLAGS overrides the workspace
     // `[target.*.rustflags]` entirely, so each build sees only its own model.
-    cross(&ws, &out, "guest", "-Crelocation-model=static");
+    let guest_elf = cross(&ws, &out, "guest", "-Crelocation-model=static");
     let sgx_elf = cross(
         &ws,
         &out,
@@ -67,8 +74,9 @@ fn main() {
         "cargo:rerun-if-changed={}",
         ws.join("host/src/snp_report.rs").display()
     );
-    println!("cargo:rerun-if-env-changed=U2FE_SGX_SIGN");
-    println!("cargo:rerun-if-env-changed=U2FE_SGX_PUBKEY");
+    for v in ["SGX_SIGN", "SGX_PUBKEY", "SNP_SIGN", "SNP_PUBKEY"] {
+        println!("cargo:rerun-if-env-changed=U2FE_{v}");
+    }
 
     let elf = std::fs::read(&sgx_elf).unwrap();
     let (segs, img) = layout(&elf);
@@ -92,7 +100,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", dflt("sgx_key.pem"));
 
     let n = pubkey_n(&std::fs::read(&pubkey).unwrap_or_else(|e| no_key(&pubkey, e)));
-    let s = sign_external(&sign_cmd, &tbs);
+    let s = BigUint::from_bytes_be(&sign_external(&sign_cmd, &tbs, MOD));
     assert!(
         n.bits() >= 3071 && n.bits() <= 3072,
         "signer must be RSA-3072"
@@ -114,13 +122,131 @@ fn main() {
     ss[1040..1040 + MOD].copy_from_slice(&le384(&(&s2 / &n)));
     ss[1424..1424 + MOD].copy_from_slice(&le384(&((&s * (&s2 % &n)) / &n)));
     std::fs::write(out.join("sgx.sigstruct"), ss).unwrap();
+
+    snp_idblock(&out, &guest_elf, dflt);
 }
 
-/// Pipe the 256-byte payload to a shell command that performs
-/// RSASSA-PKCS1-v1_5-SHA256 and writes the raw 384-byte big-endian
-/// signature to stdout, e.g. `openssl dgst -sha256 -sign key.pem` or
-/// `pkcs11-tool --sign -m SHA256-RSA-PKCS …`.
-fn sign_external(cmd: &str, tbs: &[u8; 256]) -> BigUint {
+// --- SNP ID_BLOCK / ID_AUTH ---------------------------------------------
+
+/// AMD's 1028-byte ECDSA-P384 pubkey wire format (Table 132).  Qx/Qy are
+/// 72-byte LE-padded; the report's `author_key_digest` is SHA-384 of this.
+fn sev_pubkey(sec1: &[u8; 97]) -> [u8; 1028] {
+    assert_eq!(sec1[0], 0x04);
+    let mut k = [0u8; 1028];
+    k[0..4].copy_from_slice(&2u32.to_le_bytes()); // curve = P-384
+    k[4..52].copy_from_slice(&sec1[1..49]);
+    k[4..52].reverse();
+    k[76..124].copy_from_slice(&sec1[49..97]);
+    k[76..124].reverse();
+    k
+}
+
+/// AMD's 512-byte signature wire format: r/s 72-byte LE-padded.
+fn sev_sig(r_be: &[u8], s_be: &[u8]) -> [u8; 512] {
+    let mut sig = [0u8; 512];
+    let put = |dst: &mut [u8], v: &[u8]| {
+        dst[..v.len()].copy_from_slice(v);
+        dst[..v.len()].reverse();
+    };
+    put(&mut sig[0..72], r_be);
+    put(&mut sig[72..144], s_be);
+    sig
+}
+
+fn snp_idblock(out: &Path, guest_elf: &Path, dflt: impl Fn(&str) -> String) {
+    let sign_cmd = std::env::var("U2FE_SNP_SIGN").unwrap_or_else(|_| {
+        format!(
+            "openssl dgst -sha384 -sign {}",
+            sh_quote(&dflt("snp_key.pem"))
+        )
+    });
+    let pubkey = std::env::var("U2FE_SNP_PUBKEY").unwrap_or_else(|_| dflt("snp_pub.pem"));
+    println!("cargo:rerun-if-changed={pubkey}");
+    println!("cargo:rerun-if-changed={}", dflt("snp_key.pem"));
+
+    let sec1 = pubkey_ec(&std::fs::read(&pubkey).unwrap_or_else(|e| no_key_snp(&pubkey, e)));
+    let vk = p384::ecdsa::VerifyingKey::from_sec1_bytes(&sec1)
+        .expect("U2FE_SNP_PUBKEY is not a P-384 point");
+    let pk = sev_pubkey(&sec1);
+    let akd: [u8; 48] = Sha384::digest(pk).into();
+
+    // Recompute the launch digest exactly as `--measure` does at runtime;
+    // PSP rejects LAUNCH_FINISH if it disagrees, so drift fails loudly.
+    let elf = std::fs::read(guest_elf).unwrap();
+    let mut mem = vec![0u8; 8 << 20];
+    let img = elf::load(&elf, &mut mem).expect("guest ELF");
+    let ld = measure::launch_digest(
+        &mem,
+        img.lo,
+        img.hi,
+        measure::SECRETS_GPA,
+        &measure::vmsa_page(img.entry),
+    );
+
+    // ID_BLOCK (Table 73): ld[48] family[16] image[16] version u32 svn u32 policy u64.
+    let mut idb = [0u8; 96];
+    idb[0..48].copy_from_slice(&ld);
+    idb[80..84].copy_from_slice(&1u32.to_le_bytes());
+    idb[84..88].copy_from_slice(&measure::GUEST_SVN.to_le_bytes());
+    idb[88..96].copy_from_slice(&measure::SNP_POLICY.to_le_bytes());
+
+    // Same key plays ID_KEY and AUTHOR_KEY (single-level operator identity).
+    // Two signatures: over the 96-byte ID_BLOCK, and over the 1028-byte
+    // ID_KEY pubkey struct.  Verify both here so a wrong-curve or detached
+    // signer fails at build time.
+    let sign = |what: &str, payload: &[u8]| -> [u8; 512] {
+        let der = sign_external(&sign_cmd, payload, 0);
+        let mut p = &der[..];
+        p = der_tag(&mut p, 0x30);
+        let (r, s) = (der_int(&mut p), der_int(&mut p));
+        assert!(
+            r.len() <= 48 && s.len() <= 48,
+            "U2FE_SNP_SIGN ({what}): scalar >48 bytes — signer is not P-384"
+        );
+        let mut be = [0u8; 96];
+        be[48 - r.len()..48].copy_from_slice(r);
+        be[96 - s.len()..96].copy_from_slice(s);
+        let sig = p384::ecdsa::Signature::from_slice(&be)
+            .unwrap_or_else(|e| panic!("U2FE_SNP_SIGN ({what}): not a P-384 signature: {e}"));
+        vk.verify_prehash(&Sha384::digest(payload), &sig)
+            .unwrap_or_else(|_| {
+                panic!("U2FE_SNP_SIGN ({what}): does not verify against U2FE_SNP_PUBKEY")
+            });
+        sev_sig(r, s)
+    };
+
+    // ID_AUTH (Table 74).
+    let mut ida = [0u8; 4096];
+    ida[0..4].copy_from_slice(&1u32.to_le_bytes()); // id_key_algo = ECDSA-P384-SHA384
+    ida[4..8].copy_from_slice(&1u32.to_le_bytes()); // author_key_algo
+    ida[0x040..0x240].copy_from_slice(&sign("id_block", &idb));
+    ida[0x240..0x644].copy_from_slice(&pk);
+    ida[0x680..0x880].copy_from_slice(&sign("id_key", &pk));
+    ida[0x880..0xc84].copy_from_slice(&pk);
+
+    eprintln!("  snp ld        {}", hex(&ld));
+    eprintln!("  snp author    {}", hex(&akd));
+    std::fs::write(out.join("snp.idblock"), idb).unwrap();
+    std::fs::write(out.join("snp.idauth"), &ida[..]).unwrap();
+    std::fs::write(out.join("snp.akd"), akd).unwrap();
+}
+
+fn no_key_snp(path: &str, e: std::io::Error) -> ! {
+    panic!(
+        "\n\nSNP signing public key not found at {path}: {e}.\n\
+         The signer becomes `author_key_digest` in every attestation report\n\
+         (the SNP equivalent of SGX MRSIGNER).  For a local file key:\n\n  \
+           openssl ecparam -name secp384r1 -genkey -noout > snp_key.pem\n  \
+           openssl ec -in snp_key.pem -pubout > snp_pub.pem\n\n\
+         For a hardware token, set U2FE_SNP_SIGN to a command that reads the\n\
+         payload on stdin and writes a DER ECDSA-P384-SHA384 signature to\n\
+         stdout, and U2FE_SNP_PUBKEY to its public key PEM.\n"
+    )
+}
+
+/// Pipe `tbs` to a shell command and return its stdout (the signature).
+/// `expect_len == 0` means variable-length (DER ECDSA).
+fn sign_external(cmd: &str, tbs: &[u8], expect_len: usize) -> Vec<u8> {
     use std::io::Write;
     let mut child = Command::new("sh")
         .arg("-c")
@@ -128,20 +254,18 @@ fn sign_external(cmd: &str, tbs: &[u8; 256]) -> BigUint {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn U2FE_SGX_SIGN `{cmd}`: {e}"));
+        .unwrap_or_else(|e| panic!("spawn signer `{cmd}`: {e}"));
     child.stdin.take().unwrap().write_all(tbs).unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(
-        out.status.success(),
-        "U2FE_SGX_SIGN `{cmd}` exited {}",
-        out.status
-    );
-    assert_eq!(
-        out.stdout.len(),
-        MOD,
-        "U2FE_SGX_SIGN must write a raw 384-byte big-endian signature to stdout"
-    );
-    BigUint::from_bytes_be(&out.stdout)
+    assert!(out.status.success(), "signer `{cmd}` exited {}", out.status);
+    if expect_len != 0 {
+        assert_eq!(
+            out.stdout.len(),
+            expect_len,
+            "signer `{cmd}` must write a raw {expect_len}-byte signature to stdout"
+        );
+    }
+    out.stdout
 }
 
 fn no_key(path: &str, e: std::io::Error) -> ! {
@@ -235,17 +359,38 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-// --- minimal SPKI / PKCS#1-public reader --------------------------------
+// --- minimal PEM/DER readers -------------------------------------------
 
-fn pubkey_n(pem: &[u8]) -> BigUint {
+fn pem_body(pem: &[u8]) -> Vec<u8> {
     let s = std::str::from_utf8(pem).expect("PEM utf8");
     let body: String = s
         .lines()
         .filter(|l| !l.starts_with("-----") && !l.is_empty())
         .collect();
-    let der = b64(body.as_bytes());
+    b64(body.as_bytes())
+}
+
+/// SEC1 uncompressed P-384 point from a `BEGIN PUBLIC KEY` SPKI PEM.
+fn pubkey_ec(pem: &[u8]) -> [u8; 97] {
+    let der = pem_body(pem);
+    // Same fixed-shape `BIT STRING(98){0x00, 0x04, x, y}` scan as for VCEK.
+    let i = der
+        .windows(4)
+        .position(|w| w == [0x03, 0x62, 0x00, 0x04])
+        .expect("U2FE_SNP_PUBKEY: no P-384 SEC1 point in SPKI");
+    der.get(i + 3..i + 100)
+        .expect("U2FE_SNP_PUBKEY: truncated")
+        .try_into()
+        .unwrap()
+}
+
+fn pubkey_n(pem: &[u8]) -> BigUint {
+    let der = pem_body(pem);
     let mut p = &der[..];
-    if s.contains("BEGIN PUBLIC KEY") {
+    if std::str::from_utf8(pem)
+        .unwrap()
+        .contains("BEGIN PUBLIC KEY")
+    {
         // SPKI: SEQUENCE { AlgId, BIT STRING { 0x00, RSAPublicKey } }
         p = der_tag(&mut p, 0x30);
         der_tag(&mut p, 0x30);
@@ -268,6 +413,17 @@ fn der_tag<'a>(p: &mut &'a [u8], tag: u8) -> &'a [u8] {
     let v = &p[hdr..hdr + len];
     *p = &p[hdr + len..];
     v
+}
+
+/// DER INTEGER, sign-magnitude leading 0x00 stripped so the result is the
+/// raw big-endian scalar.
+fn der_int<'a>(p: &mut &'a [u8]) -> &'a [u8] {
+    let v = der_tag(p, 0x02);
+    if v.first() == Some(&0) {
+        &v[1..]
+    } else {
+        v
+    }
 }
 
 fn b64(s: &[u8]) -> Vec<u8> {

@@ -350,13 +350,15 @@ fn print_measure() -> io::Result<()> {
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
 
     println!("snp           {}", verify::hex(&ld));
+    println!("snp author    {}", verify::hex(snp::AUTHOR_KEY_DIGEST));
     println!("sgx mrenclave {}", verify::hex(sgx::mrenclave()));
     println!("sgx mrsigner  {}", verify::hex(&sgx::mrsigner()));
     io::stdout().flush()?;
     eprintln!(
         "↑ expected measurements for this build.\n  \
-         attStmt[\"snp\"] (1184 B) carries the SNP digest at 0x90..0xc0;\n    \
-           check it after verifying the VCEK signature.\n  \
+         attStmt[\"snp\"] (1184 B) carries the SNP digest at 0x90..0xc0\n    \
+           and the author key digest at 0x110..0x140; check after verifying\n    \
+           the VCEK signature.\n  \
          attStmt[\"sgx\"] (432 B) carries MRENCLAVE at 0x40 and MRSIGNER at 0x80.\n\
          SNP inputs:\n  \
          guest image  {:#x}..{:#x} ({} KiB, {} pages)\n  \

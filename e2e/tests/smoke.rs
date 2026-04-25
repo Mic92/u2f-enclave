@@ -37,22 +37,16 @@ fn libfido2_sgx() {
     assert_eq!(rep.len(), 432);
     assert_eq!(rep[48] & 0x02, 0, "DEBUG attribute set");
 
-    let m = Command::new(host_bin("u2f-enclave"))
-        .arg("--measure")
-        .output()
-        .unwrap();
-    let m = String::from_utf8(m.stdout).unwrap();
-    let want = |k: &str| {
-        m.lines()
-            .find(|l| l.starts_with(k))
-            .unwrap()
-            .split_whitespace()
-            .last()
-            .unwrap()
-            .to_string()
-    };
-    assert_eq!(hex(&rep[64..96]), want("sgx mrenclave"), "MRENCLAVE");
-    assert_eq!(hex(&rep[128..160]), want("sgx mrsigner"), "MRSIGNER");
+    assert_eq!(
+        hex(&rep[64..96]),
+        measure_line("sgx mrenclave"),
+        "MRENCLAVE"
+    );
+    assert_eq!(
+        hex(&rep[128..160]),
+        measure_line("sgx mrsigner"),
+        "MRSIGNER"
+    );
 
     use sha2::Digest;
     let mut h = sha2::Sha512::default();
@@ -122,6 +116,16 @@ fn libfido2_vmm_snp() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     eprint!("{stdout}");
     assert!(out.status.success(), "u2f-enclave verify failed");
+    // PSP populates these only if it accepted the build-time-signed
+    // ID_BLOCK/ID_AUTH at LAUNCH_FINISH — i.e. predictor matched and the
+    // ECDSA chain checked out.  This is the "SNP MRSIGNER" field.
+    assert_eq!(rep[0x48] & 1, 1, "author_key_en not set");
+    assert_eq!(
+        hex(&rep[0x110..0x140]),
+        measure_line("snp author"),
+        "author_key_digest"
+    );
+    assert_eq!(rep[4], 1, "guest_svn");
 
     let mut h = sha2::Sha512::default();
     use sha2::Digest;

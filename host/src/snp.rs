@@ -22,19 +22,14 @@ const KVM_SEV_SNP_LAUNCH_FINISH: u32 = 102;
 const SNP_PAGE_TYPE_NORMAL: u8 = 1;
 const SNP_PAGE_TYPE_SECRETS: u8 = 5;
 
-/// Fixed GPA for the secrets page; matches `guest/src/greq.rs`.
-pub const SECRETS_GPA: u64 = 0x1000;
+pub use crate::measure::{C_BIT, SECRETS_GPA, SNP_POLICY};
 
-/// Bit 17 must be set; bit 16 (SMT) must be set on SMT hosts or the PSP
-/// rejects the launch (`SNP_POLICY_MASK_RSVD_MBO`/`_SMT`).
-pub const SNP_POLICY: u64 = (1 << 17) | (1 << 16);
-
-/// The C-bit position is part of the measured initial register state
-/// (we pass it to the guest in `%esi`). Hard-coding it makes the
-/// measurement host-independent; every shipping SNP part uses 51, and
-/// `init()` asserts the running host agrees so a hypothetical future
-/// part fails here instead of producing an unrecognised measurement.
-pub const C_BIT: u32 = 51;
+/// Embedded build-time-signed ID block: PSP checks `ID_BLOCK.ld == launch
+/// digest` and the P-384 chain in `ID_AUTH`, then stamps `author_key_digest`
+/// (the SNP analogue of MRSIGNER) into every attestation report.
+pub static ID_BLOCK: &[u8; 96] = include_bytes!(concat!(env!("OUT_DIR"), "/snp.idblock"));
+pub static ID_AUTH: &[u8; 4096] = include_bytes!(concat!(env!("OUT_DIR"), "/snp.idauth"));
+pub static AUTHOR_KEY_DIGEST: &[u8; 48] = include_bytes!(concat!(env!("OUT_DIR"), "/snp.akd"));
 
 #[repr(C)]
 #[derive(Default)]
@@ -149,7 +144,13 @@ impl Snp {
             vm,
             &self.sev,
             KVM_SEV_SNP_LAUNCH_FINISH,
-            &mut SnpLaunchFinish::default(),
+            &mut SnpLaunchFinish {
+                id_block_uaddr: ID_BLOCK.as_ptr() as u64,
+                id_auth_uaddr: ID_AUTH.as_ptr() as u64,
+                id_block_en: 1,
+                auth_key_en: 1,
+                ..Default::default()
+            },
         )?;
         Ok(())
     }

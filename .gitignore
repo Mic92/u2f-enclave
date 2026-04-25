@@ -5,3 +5,5 @@ result-*
 # MRSIGNER signing key — generated per-operator, never checked in.
 /sgx_key.pem
 /sgx_pub.pem
+/snp_key.pem
+/snp_pub.pem

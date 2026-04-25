@@ -15,6 +15,23 @@ use std::time::{Duration, Instant};
 
 pub mod coco;
 
+/// Hex value from the line of `u2f-enclave --measure` starting with `key`.
+pub fn measure_line(key: &str) -> String {
+    let m = std::process::Command::new(host_bin("u2f-enclave"))
+        .arg("--measure")
+        .output()
+        .unwrap();
+    String::from_utf8(m.stdout)
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with(key))
+        .unwrap_or_else(|| panic!("--measure has no `{key}` line"))
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string()
+}
+
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
