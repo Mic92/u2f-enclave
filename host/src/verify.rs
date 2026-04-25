@@ -9,8 +9,7 @@ use crate::snp_report::{cert_p384_pubkey, verify_sig};
 pub use crate::snp_report::{Report, REPORT_LEN};
 
 /// Verify the report against a VCEK leaf cert (DER).  ASK/ARK chain is not
-/// checked: the HTTPS fetch already pins to AMD's endpoint, and the guest's
-/// own use of `verify_sig` pins by same-chip self-check instead.
+/// checked: the HTTPS fetch already pins to AMD's endpoint.
 pub fn verify_signature(r: &Report<'_>, vcek_der: &[u8]) -> Result<(), String> {
     let pk = cert_p384_pubkey(vcek_der).ok_or("no P-384 SEC1 point in VCEK cert")?;
     verify_sig(r, &pk).map_err(String::from)

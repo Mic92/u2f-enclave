@@ -1,7 +1,6 @@
 //! `no_std` view over an SNP `ATTESTATION_REPORT` plus VCEK signature check.
-//! Shared between the host `verify` subcommand and the guest's migrate
-//! donor (via `#[path]`-include) so both parse the same offsets and run the
-//! same P-384 verify; any drift would be a security bug on the guest side.
+//! Shared between the host CLI and the guest (via `#[path]`-include) so both
+//! parse the same offsets and run the same P-384 verify.
 //!
 //! Refs: SNP firmware ABI §7.3 Table 22; AMD KDS spec.
 #![allow(dead_code)]
@@ -57,8 +56,8 @@ impl Report<'_> {
 
 /// Verify the report's ECDSA P-384 signature against a SEC1-encoded VCEK
 /// public key.  No certificate chain — callers establish trust in `vcek`
-/// separately (HTTPS-from-AMD on the host CLI; same-chip self-check inside
-/// the guest, since donor and recipient share one VCEK).
+/// separately (HTTPS-from-AMD on the host CLI; same-chip self-check in the
+/// guest).
 pub fn verify_sig(r: &Report<'_>, vcek: &[u8; 97]) -> Result<(), &'static str> {
     let vk = VerifyingKey::from_sec1_bytes(vcek).map_err(|_| "VCEK key not on curve")?;
     let sig = Signature::from_slice(&r.sig_be()).map_err(|_| "report signature malformed")?;
