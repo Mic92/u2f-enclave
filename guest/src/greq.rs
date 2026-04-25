@@ -146,8 +146,9 @@ pub fn report(user_data: &[u8; 64]) -> Option<[u8; REPORT_LEN]> {
 }
 
 /// 32-byte key the PSP derives from the chip's VCEK root mixed with this
-/// guest's launch measurement and policy. Same binary on same chip ⇒ same
-/// key across reboots; this is our master-secret persistence primitive.
+/// guest's launch measurement and policy.  Same binary on same chip ⇒ same
+/// key across reboots, so it works as the KEK that seals the random master
+/// to disk.  Different binary ⇒ different KEK ⇒ unseal tag fails.
 pub fn derived_key() -> Option<[u8; 32]> {
     // MSG_KEY_REQ = root_key_select u32 || rsvd u32 || guest_field_select u64
     //             || vmpl u32 || guest_svn u32 || tcb_version u64

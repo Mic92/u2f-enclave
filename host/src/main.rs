@@ -20,6 +20,7 @@ mod sgx;
 mod sgx_layout;
 mod snp;
 mod snp_report;
+mod state;
 mod verify;
 mod vhost;
 
@@ -34,7 +35,8 @@ const USAGE: &str = "\
 FIDO2/CTAP2 authenticator running in a confidential VM or SGX enclave.
 
 Usage:
-  u2f-enclave [--snp|--sgx] [CID]    run; exposes the authenticator as a
+  u2f-enclave [--snp [--fresh]|--sgx] [CID]
+                                     run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
   u2f-enclave --measure              print this build's SNP launch digest
                                      and SGX MRENCLAVE/MRSIGNER and exit
@@ -52,6 +54,7 @@ Usage:
                                      `verify` it on another machine)
 
   --snp        launch under SEV-SNP (encrypted+measured); requires /dev/sev
+  --fresh      with --snp: discard prior state, generate a new master key
   --sgx        run inside an SGX enclave instead of a VM (no vsock);
                requires /dev/sgx_enclave
   CID          AF_VSOCK context ID for the guest VM (default 42; ignored
@@ -93,6 +96,7 @@ fn main() -> io::Result<()> {
     }
     let measure = args.next_if_eq("--measure").is_some();
     let snp = !measure && args.next_if_eq("--snp").is_some();
+    let fresh = snp && args.next_if_eq("--fresh").is_some();
     let cid: u64 = match args.next().map(|s| s.parse()) {
         None => 42,
         Some(Ok(n)) if !measure => n,
@@ -103,6 +107,13 @@ fn main() -> io::Result<()> {
     };
     if measure {
         return print_measure();
+    }
+    if fresh {
+        match std::fs::remove_file(state::path()) {
+            Ok(()) => eprintln!("u2f-enclave: discarded {}", state::path().display()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
 
     let kvm = open_dev("/dev/kvm")?;
@@ -204,7 +215,7 @@ fn main() -> io::Result<()> {
     }
 
     if vsock.is_some() {
-        spawn_bridge(cid as u32);
+        spawn_bridge(cid as u32, snp);
     }
 
     loop {
@@ -296,15 +307,21 @@ fn main() -> io::Result<()> {
 /// Connect to the guest over AF_VSOCK and run the uhid loop. The guest is
 /// not listening yet when this is spawned (vCPU hasn't run), so retry until
 /// the connect succeeds.
-fn spawn_bridge(cid: u32) {
+fn spawn_bridge(cid: u32, snp: bool) {
     std::thread::spawn(move || {
         let addr = vsock::VsockAddr::new(cid, 5555);
-        let s = loop {
+        let mut s = loop {
             match vsock::VsockStream::connect(&addr) {
                 Ok(s) => break s,
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
             }
         };
+        if snp {
+            if let Err(e) = state::prelude(&mut s) {
+                eprintln!("u2f-enclave: state: {e}");
+                std::process::exit(1);
+            }
+        }
         let r = s.try_clone().expect("vsock clone");
         if let Err(e) = bridge::serve(r, s) {
             eprintln!("bridge: {e}");

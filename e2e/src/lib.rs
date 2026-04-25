@@ -15,6 +15,13 @@ use std::time::{Duration, Instant};
 
 pub mod coco;
 
+/// Stable across `vmm_backend` calls within one test (so launch 2 sees
+/// launch 1's `snp.state`), isolated from the real `$XDG_DATA_HOME`.
+pub fn host_data_dir() -> PathBuf {
+    PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"))
+        .join("u2fe-e2e-data")
+}
+
 /// Hex value from the line of `u2f-enclave --measure` starting with `key`.
 pub fn measure_line(key: &str) -> String {
     let m = std::process::Command::new(host_bin("u2f-enclave"))
@@ -237,14 +244,14 @@ pub fn sim_backend() -> Backend {
     }
 }
 
-pub fn vmm_backend(coco: &str) -> Backend {
+pub fn vmm_backend(flags: &[&str]) -> Backend {
     let tmp = Tmp::new("host");
     let mut procs = Procs::default();
     let mut cmd = Command::new(host_bin("u2f-enclave"));
-    if !coco.is_empty() {
-        cmd.arg(coco);
-    }
-    procs.spawn(cmd.arg("42"));
+    cmd.args(flags)
+        .arg("42")
+        .env("XDG_DATA_HOME", host_data_dir());
+    procs.spawn(&mut cmd);
     Backend {
         hidraw: find_hidraw(),
         procs,

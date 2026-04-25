@@ -19,6 +19,7 @@ mod boot;
 mod greq;
 mod platform;
 mod pv;
+mod seal;
 mod serial;
 mod sev;
 #[path = "../../host/src/snp_report.rs"]
@@ -64,7 +65,17 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
     serial::print_u32(VSOCK_PORT);
     serial::print("\n");
 
-    let mut auth = ctap::Authenticator::new(platform::BareMetal::new(), ctap::AAGUID);
+    // Under SNP the master is random and persists via the host's state
+    // file; under plain KVM it is per-process ephemeral.
+    let master = if sev::active() {
+        seal::prelude(vs)
+    } else {
+        let mut m = [0u8; 32];
+        platform::fill_rdrand(&mut m);
+        m
+    };
+
+    let mut auth = ctap::Authenticator::new(platform::BareMetal::new(master), ctap::AAGUID);
     let mut report = [0u8; ctap::HID_REPORT_SIZE];
     loop {
         vs.read_report(&mut report);
@@ -77,7 +88,7 @@ pub extern "C" fn rust64_start(c_bit: u32) -> ! {
 /// Signal exit via the isa-debug-exit port; the host turns this into a
 /// process exit code of `(code << 1) | 1`. Falls back to `hlt` if nobody is
 /// listening.
-fn debug_exit(code: u32) -> ! {
+pub fn debug_exit(code: u32) -> ! {
     pv::outl(0xf4, code);
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };

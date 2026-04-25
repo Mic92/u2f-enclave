@@ -11,19 +11,11 @@ pub struct BareMetal {
 }
 
 impl BareMetal {
-    pub fn new() -> Self {
-        let snp = sev::active();
-        if snp {
-            // Survives restarts; see `greq::derived_key`.
-            if let Some(master) = greq::derived_key() {
-                crate::serial::print("u2f-enclave: PSP-derived master key\n");
-                return Self { master, snp };
-            }
-            crate::serial::print("u2f-enclave: MSG_KEY_REQ failed; ephemeral key\n");
+    pub fn new(master: [u8; 32]) -> Self {
+        Self {
+            master,
+            snp: sev::active(),
         }
-        let mut master = [0u8; 32];
-        fill_rdrand(&mut master);
-        Self { master, snp }
     }
 }
 
@@ -45,7 +37,7 @@ impl ctap::Platform for BareMetal {
 
 /// RDRAND's DRNG is on-die and not hypervisor-mediated, so it is inside the
 /// SEV-SNP trust boundary.
-fn fill_rdrand(buf: &mut [u8]) {
+pub fn fill_rdrand(buf: &mut [u8]) {
     for chunk in buf.chunks_mut(8) {
         let mut v = 0u64;
         // Retry on transient underflow; the SDM bounds this at a handful of

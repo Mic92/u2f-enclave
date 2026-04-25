@@ -14,7 +14,7 @@ fn libfido2_vmm() {
     {
         return;
     }
-    let be = vmm_backend("");
+    let be = vmm_backend(&[]);
     fido2_roundtrip(&be.hidraw);
 }
 
@@ -29,7 +29,7 @@ fn libfido2_sgx() {
     if !need_writable("/dev/uhid") || !have_sgx() {
         return;
     }
-    let be = vmm_backend("--sgx");
+    let be = vmm_backend(&["--sgx"]);
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x33u8; 32];
@@ -55,7 +55,7 @@ fn libfido2_sgx() {
     assert_eq!(&rep[320..384], &h.finalize()[..], "REPORTDATA binding");
 
     drop(be);
-    let be = vmm_backend("--sgx");
+    let be = vmm_backend(&["--sgx"]);
     assert_eq!(
         coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
         0,
@@ -79,7 +79,9 @@ fn libfido2_vmm_snp() {
     {
         return;
     }
-    let be = vmm_backend("--snp");
+    // `--fresh` so the run is hermetic; the relaunch below then proves the
+    // master persists via the state file (not via KEK determinism alone).
+    let be = vmm_backend(&["--snp", "--fresh"]);
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x11u8; 32];
@@ -137,11 +139,13 @@ fn libfido2_vmm_snp() {
         "report_data does not bind authData||cdh"
     );
 
-    // Second launch: launch-1's credId still resolves, i.e. the
-    // PSP-derived master key is in fact stable.
+    // Second launch: launch-1's credId still resolves, i.e. the random
+    // master round-tripped through `snp.state`.
     let m1 = rep[0x90..0xc0].to_vec();
+    let state = host_data_dir().join("u2f-enclave/snp.state");
+    assert!(state.exists(), "snp.state not written");
     drop(be);
-    let be = vmm_backend("--snp");
+    let be = vmm_backend(&["--snp"]);
     let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
     assert_eq!(
         &rep2[0x90..0xc0],
@@ -152,6 +156,16 @@ fn libfido2_vmm_snp() {
         coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
         0,
         "launch-1 credential did not resolve after relaunch"
+    );
+    drop(be);
+
+    // Third launch, `--fresh`: same credId must NOT resolve — proves the
+    // relaunch above succeeded via the file, not by accident.
+    let be = vmm_backend(&["--snp", "--fresh"]);
+    assert_ne!(
+        coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
+        0,
+        "credential resolved after --fresh"
     );
 }
 
