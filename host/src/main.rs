@@ -17,6 +17,7 @@ mod kvm;
 mod measure;
 mod mmio;
 mod sgx;
+mod sgx_layout;
 mod snp;
 mod verify;
 mod vhost;
@@ -34,8 +35,8 @@ FIDO2/CTAP2 authenticator running as a confidential VM.
 Usage:
   u2f-enclave [--snp] [GUEST_CID]    run; exposes the authenticator as a
                                      /dev/hidraw* device via uhid
-  u2f-enclave --measure              print this build's SNP launch
-                                     measurement and exit
+  u2f-enclave --measure              print this build's SNP launch digest
+                                     and SGX MRENCLAVE/MRSIGNER and exit
   u2f-enclave verify [--vcek FILE]   read a 1184-byte SNP report on stdin;
                                      check its VCEK signature and that its
                                      measurement matches this build; print
@@ -346,13 +347,16 @@ fn print_measure() -> io::Result<()> {
     let vmsa = measure::vmsa_page(img.entry);
     let ld = measure::launch_digest(&mem, img.lo, img.hi, snp::SECRETS_GPA, &vmsa);
 
-    println!("snp  {}", verify::hex(&ld));
+    println!("snp           {}", verify::hex(&ld));
+    println!("sgx mrenclave {}", verify::hex(sgx::mrenclave()));
+    println!("sgx mrsigner  {}", verify::hex(&sgx::mrsigner()));
     io::stdout().flush()?;
     eprintln!(
-        "↑ SNP launch measurement for this build.\n  \
-         attStmt[\"snp\"] (1184 B) carries it at 0x90..0xc0; check it\n    \
-           after verifying the VCEK signature.\n\
-         inputs:\n  \
+        "↑ expected measurements for this build.\n  \
+         attStmt[\"snp\"] (1184 B) carries the SNP digest at 0x90..0xc0;\n    \
+           check it after verifying the VCEK signature.\n  \
+         attStmt[\"sgx\"] (432 B) carries MRENCLAVE at 0x40 and MRSIGNER at 0x80.\n\
+         SNP inputs:\n  \
          guest image  {:#x}..{:#x} ({} KiB, {} pages)\n  \
          entry        {:#x}\n  \
          secrets gpa  {:#x}\n  \

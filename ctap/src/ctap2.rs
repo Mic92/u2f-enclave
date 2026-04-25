@@ -153,15 +153,20 @@ fn make_credential<P: Platform>(ctx: &mut Ctx<'_, P>, params: &[u8]) -> Result<V
     w.unsigned(3);
     // Stays `"packed"` so stock libfido2/WebAuthn verifiers accept the
     // self-attestation; a hardware-aware verifier additionally checks the
-    // extra `"snp"`/`"tdx"` entry, which the spec ignores.
-    w.map(if coco.is_some() { 3 } else { 2 });
+    // extra `"snp"`/`"sgx"` entry, which the spec ignores.  CTAP2 canonical
+    // CBOR orders text keys length-then-bytewise, and libfido2 rejects a
+    // non-canonical map (`"sgx"` < `"sig"`!), so sort.
+    let mut tail: Vec<(&str, &[u8])> = vec![("sig", &sig)];
+    if let Some((k, r)) = &coco {
+        tail.push((k, r));
+    }
+    tail.sort_by(|(a, _), (b, _)| (a.len(), *a).cmp(&(b.len(), *b)));
+    w.map(1 + tail.len() as u64);
     w.text("alg");
     w.int(-7);
-    w.text("sig");
-    w.bytes(&sig);
-    if let Some((key, r)) = coco {
-        w.text(key);
-        w.bytes(&r);
+    for (k, v) in tail {
+        w.text(k);
+        w.bytes(v);
     }
     Ok(w.into_vec())
 }

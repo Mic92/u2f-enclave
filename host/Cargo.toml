@@ -16,4 +16,7 @@ ctap = { path = "../ctap" }
 vsock = "0.5"
 sha2 = "0.10"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+[build-dependencies]
+sha2 = "0.10"
 num-bigint = { version = "0.4", default-features = false }

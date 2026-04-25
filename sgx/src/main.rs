@@ -94,8 +94,10 @@ struct Sgx {
 
 impl Sgx {
     fn new() -> Self {
+        // EGETKEY yields 128 bits; the master keys HMAC-SHA256 over P-256
+        // material, so 128-bit entropy already matches the curve's level.
         let mut master = [0u8; 32];
-        rdrand(&mut master);
+        master[..16].copy_from_slice(&seal_key());
         Self { master }
     }
 }
@@ -106,6 +108,79 @@ impl Platform for Sgx {
     }
     fn master_secret(&self) -> [u8; 32] {
         self.master
+    }
+    fn attestation(&mut self, rd: &[u8; 64]) -> Option<(&'static str, Vec<u8>)> {
+        Some(("sgx", ereport(rd).to_vec()))
+    }
+}
+
+// --- ENCLU --------------------------------------------------------------
+
+#[repr(C, align(512))]
+struct A512<const N: usize>([u8; N]);
+#[repr(C, align(128))]
+struct A128<const N: usize>([u8; N]);
+#[repr(C, align(16))]
+struct A16([u8; 16]);
+
+/// rbx is LLVM-reserved, hence the xchg dance.
+unsafe fn enclu(leaf: u64, b: *const u8, c: *mut u8, d: *mut u8) -> u64 {
+    let ret;
+    core::arch::asm!(
+        "xchg {b}, rbx",
+        ".byte 0x0f, 0x01, 0xd7",
+        "xchg {b}, rbx",
+        b = inout(reg) b => _,
+        inout("rax") leaf => ret,
+        in("rcx") c,
+        in("rdx") d,
+        options(nostack),
+    );
+    ret
+}
+
+/// Seal key bound to MRSIGNER (the build-time RSA key) so credentials
+/// survive enclave updates as long as the same key signs them.  CPUSVN=0
+/// trades microcode-rollback resistance for that same stability; the
+/// SIGSTRUCT pins DEBUG=0, and we mask INIT|DEBUG into the derivation as
+/// defence in depth.
+fn seal_key() -> [u8; 16] {
+    const KEY_SEAL: u16 = 4;
+    const POLICY_MRSIGNER: u16 = 1 << 1;
+    static mut KR: A512<512> = A512([0; 512]);
+    static mut OUT: A16 = A16([0; 16]);
+    unsafe {
+        let kr = &mut (*addr_of_mut!(KR)).0;
+        kr[0..2].copy_from_slice(&KEY_SEAL.to_le_bytes());
+        kr[2..4].copy_from_slice(&POLICY_MRSIGNER.to_le_bytes());
+        kr[24..32].copy_from_slice(&3u64.to_le_bytes()); // ATTRIBUTEMASK = INIT|DEBUG
+        let r = enclu(
+            1,
+            kr.as_ptr(),
+            addr_of_mut!(OUT) as _,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(r, 0);
+        (*addr_of_mut!(OUT)).0
+    }
+}
+
+/// EREPORT for `attStmt["sgx"]`.  TARGETINFO is all-zero so the MAC is for a
+/// null target — the body (MRENCLAVE/MRSIGNER/ATTRIBUTES/REPORTDATA) is what
+/// the verifier reads, and a host-side QE wraps a fresh one for DCAP.
+fn ereport(report_data: &[u8; 64]) -> [u8; 432] {
+    static mut TI: A512<512> = A512([0; 512]);
+    static mut RD: A128<64> = A128([0; 64]);
+    static mut REP: A512<432> = A512([0; 432]);
+    unsafe {
+        (*addr_of_mut!(RD)).0 = *report_data;
+        enclu(
+            0,
+            addr_of_mut!(TI) as _,
+            addr_of_mut!(RD) as _,
+            addr_of_mut!(REP) as _,
+        );
+        (*addr_of_mut!(REP)).0
     }
 }
 

@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 
 pub mod coco;
 
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// Tests share `/dev/uhid` (single device name) and the vsock CID, so they

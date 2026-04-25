@@ -2,3 +2,5 @@
 result
 result-*
 .direnv
+# MRSIGNER private key — generated per-operator, never checked in.
+/sgx_key.pem

@@ -1,5 +1,5 @@
 //! Hand-rolled SGX loader: lay the embedded `sgx` ELF into EPC via
-//! `/dev/sgx_enclave`, sign a SIGSTRUCT for it on the fly, and call into it
+//! `/dev/sgx_enclave`, EINIT with the build-time SIGSTRUCT, and call into it
 //! through the kernel vDSO.  No Intel SDK, no SGXS files — the ELF's three
 //! PT_LOADs map 1:1 to TCS / RX-REG / RW-REG segments so the loader stays a
 //! straight walk over program headers.
@@ -13,25 +13,26 @@ use std::os::unix::net::UnixStream;
 
 use crate::kvm::ioc_raw;
 use crate::open_dev;
+use crate::sgx_layout::*;
 
-const PAGE: u64 = 4096;
 const SGX_MAGIC: u32 = 0xA4;
 const SGX_PAGE_MEASURE: u64 = 1;
-
-const SECINFO_R: u64 = 1;
-const SECINFO_W: u64 = 2;
-const SECINFO_X: u64 = 4;
-const SECINFO_TCS: u64 = 1 << 8;
-const SECINFO_REG: u64 = 2 << 8;
-
-const ATTR_MODE64BIT: u64 = 1 << 2;
-const XFRM_LEGACY: u64 = 0x3; // x87 + SSE; mandatory floor
 
 const ENCLU_EENTER: u32 = 2;
 const ENCLU_EEXIT: u32 = 4;
 
-const SIGSTRUCT_LEN: usize = 1808;
-const MOD: usize = 384; // 3072-bit
+/// Signed at build time from `$U2FE_SGX_KEY`; the private key never reaches
+/// this binary, so the (untrusted) host cannot mint another SIGSTRUCT under
+/// the same MRSIGNER.
+pub static SIGSTRUCT: &[u8; 1808] = include_bytes!(concat!(env!("OUT_DIR"), "/sgx.sigstruct"));
+
+pub fn mrenclave() -> &'static [u8] {
+    &SIGSTRUCT[960..992]
+}
+pub fn mrsigner() -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(&SIGSTRUCT[128..512]).into()
+}
 
 #[repr(C)]
 struct AddPages {
@@ -42,9 +43,6 @@ struct AddPages {
     flags: u64,
     count: u64,
 }
-
-#[repr(C, align(4096))]
-struct Page([u8; 4096]);
 
 #[repr(C, align(64))]
 struct Secinfo {
@@ -78,78 +76,11 @@ pub struct Enclave {
     vdso: usize,
 }
 
-struct Seg {
-    off: u64,
-    len: u64,
-    flags: u64,
-    prot: i32,
-}
-
-/// Layout the ELF (linked at 0, p_vaddr == enclave offset) into a fresh
-/// page-aligned image and derive per-segment SECINFO from p_flags.
-fn layout(elf: &[u8]) -> (Vec<Seg>, Box<[Page]>) {
-    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
-    let phentsz = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
-
-    // Compute total span first so the image buffer can be sized once.
-    let mut hi = 0u64;
-    for i in 0..phnum {
-        let ph = &elf[phoff + i * phentsz..];
-        if u32::from_le_bytes(ph[0..4].try_into().unwrap()) != 1 {
-            continue; // PT_LOAD only
-        }
-        let va = u64::from_le_bytes(ph[16..24].try_into().unwrap());
-        let memsz = u64::from_le_bytes(ph[40..48].try_into().unwrap());
-        hi = hi.max((va + memsz).next_multiple_of(PAGE));
-    }
-    let mut img = (0..hi / PAGE)
-        .map(|_| Page([0; 4096]))
-        .collect::<Box<[_]>>();
-    let bytes = unsafe { std::slice::from_raw_parts_mut(img.as_mut_ptr() as *mut u8, hi as usize) };
-
-    let mut segs = Vec::new();
-    for i in 0..phnum {
-        let ph = &elf[phoff + i * phentsz..];
-        if u32::from_le_bytes(ph[0..4].try_into().unwrap()) != 1 {
-            continue;
-        }
-        let pf = u32::from_le_bytes(ph[4..8].try_into().unwrap());
-        let foff = u64::from_le_bytes(ph[8..16].try_into().unwrap()) as usize;
-        let va = u64::from_le_bytes(ph[16..24].try_into().unwrap());
-        let filesz = u64::from_le_bytes(ph[32..40].try_into().unwrap()) as usize;
-        let memsz = u64::from_le_bytes(ph[40..48].try_into().unwrap());
-
-        bytes[va as usize..va as usize + filesz].copy_from_slice(&elf[foff..foff + filesz]);
-
-        // First segment is the TCS by linker-script convention.
-        // SECINFO {R,W,X} and PROT_{READ,WRITE,EXEC} share bit positions
-        // (1/2/4), so the SECINFO low bits double as the mmap prot.
-        let (flags, prot) = if segs.is_empty() {
-            (SECINFO_TCS, libc::PROT_READ | libc::PROT_WRITE)
-        } else {
-            let rwx = (if pf & 4 != 0 { SECINFO_R } else { 0 })
-                | (if pf & 2 != 0 { SECINFO_W } else { 0 })
-                | (if pf & 1 != 0 { SECINFO_X } else { 0 });
-            (SECINFO_REG | rwx, rwx as libc::c_int)
-        };
-        let off = va & !(PAGE - 1);
-        segs.push(Seg {
-            off,
-            len: (va + memsz).next_multiple_of(PAGE) - off,
-            flags,
-            prot,
-        });
-    }
-    (segs, img)
-}
-
 pub fn load(elf: &[u8]) -> io::Result<Enclave> {
     let fd = open_dev("/dev/sgx_enclave")?;
     let (segs, img) = layout(elf);
     let bytes = img.as_ptr() as *const u8;
-    let blob = segs.last().map(|s| s.off + s.len).unwrap();
-    let size = blob.next_power_of_two();
+    let size = secs_size(&segs);
 
     // SECS.base must be naturally aligned to SECS.size, which the C heap
     // won't give us.  Reserve double, pick the aligned window inside, and
@@ -179,7 +110,7 @@ pub fn load(elf: &[u8]) -> io::Result<Enclave> {
     }
 
     // ECREATE
-    let mut secs = Box::new(Page([0; 4096]));
+    let mut secs = Box::new(AlignedPage([0; 4096]));
     secs.0[0..8].copy_from_slice(&size.to_le_bytes());
     secs.0[8..16].copy_from_slice(&base.to_le_bytes());
     secs.0[16..20].copy_from_slice(&1u32.to_le_bytes()); // ssa_frame_size (in pages)
@@ -213,19 +144,23 @@ pub fn load(elf: &[u8]) -> io::Result<Enclave> {
     }
 
     // EINIT — the kernel programs IA32_SGXLEPUBKEYHASH from our modulus
-    // (FLC), so the in-tree debug key works without a launch token.
-    let ss = sigstruct(&segs, bytes, size);
-    let mut p = ss.as_ptr() as u64;
+    // (FLC), so any signing key works without a launch token.
+    let mut p = SIGSTRUCT.as_ptr() as u64;
     ioctl(&fd, SGX_IOC_INIT, &mut p, "SGX_IOC_ENCLAVE_INIT")?;
 
     // Map each segment over the reservation so EENTER can actually reach it.
     // EPC permissions cap the VMA's; the driver rejects a wider mmap.
     for s in &segs {
+        let prot = if s.flags == SECINFO_TCS {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            (s.flags & 7) as libc::c_int
+        };
         let r = unsafe {
             libc::mmap(
                 (base + s.off) as _,
                 s.len as _,
-                s.prot,
+                prot,
                 libc::MAP_SHARED | libc::MAP_FIXED,
                 fd.as_raw_fd(),
                 0,
@@ -304,100 +239,6 @@ fn ioctl<T>(fd: &impl AsRawFd, req: libc::c_ulong, arg: &mut T, what: &str) -> i
         return Err(io::Error::new(e.kind(), format!("{what}: {e}")));
     }
     Ok(())
-}
-
-// --- MRENCLAVE + SIGSTRUCT -----------------------------------------------
-
-use num_bigint::BigUint;
-use sha2::{Digest, Sha256};
-
-/// Reproduce the SHA-256 stream EINIT checks against MRENCLAVE: one 64-byte
-/// record per ECREATE / EADD, plus per 256-byte chunk one EEXTEND record
-/// followed by the chunk itself.  Mirrors `mrenclave_*` in the kernel
-/// selftest's `sigstruct.c`.
-fn mrenclave(segs: &[Seg], img: *const u8, size: u64) -> [u8; 32] {
-    let mut h = Sha256::new();
-    let mut rec = |tag: u64, b: u64, c: u64, dlen, data: &[u8]| {
-        let mut r = [0u8; 64];
-        r[0..8].copy_from_slice(&tag.to_le_bytes());
-        r[8..8 + dlen].copy_from_slice(&b.to_le_bytes()[..dlen]);
-        r[8 + dlen..16 + dlen].copy_from_slice(&c.to_le_bytes());
-        h.update(r);
-        h.update(data);
-    };
-    // "ECREATE\0", ssaframesize=1 (u32), size (u64)
-    rec(0x0045544145524345, 1, size, 4, &[]);
-    for s in segs {
-        for p in (s.off..s.off + s.len).step_by(PAGE as usize) {
-            rec(0x0000000044444145, p, s.flags, 8, &[]); // "EADD"
-            for c in (p..p + PAGE).step_by(256) {
-                let chunk = unsafe { std::slice::from_raw_parts(img.add(c as usize), 256) };
-                rec(0x00444E4554584545, c, 0, 8, chunk); // "EEXTEND"
-            }
-        }
-    }
-    h.finalize().into()
-}
-
-fn le384(n: &BigUint) -> [u8; MOD] {
-    let mut b = [0u8; MOD];
-    let v = n.to_bytes_le();
-    b[..v.len()].copy_from_slice(&v);
-    b
-}
-
-/// Debug RSA-3072 (e=3) key, generated once with `openssl genrsa -3 3072`.
-/// MRSIGNER (= SHA-256 of the LE modulus) is therefore a fixed constant
-/// independent of the enclave contents.
-const DEBUG_N: &[u8; MOD] = &include!("sgx_key_n.in");
-const DEBUG_D: &[u8; MOD] = &include!("sgx_key_d.in");
-
-fn sigstruct(segs: &[Seg], img: *const u8, size: u64) -> Box<[u8; SIGSTRUCT_LEN]> {
-    let mut ss = Box::new([0u8; SIGSTRUCT_LEN]);
-
-    // header (SDM Table 38-19): magic constants, vendor=0, date=0.
-    ss[0..16].copy_from_slice(&[6, 0, 0, 0, 0xe1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-    ss[24..40].copy_from_slice(&[1, 1, 0, 0, 0x60, 0, 0, 0, 0x60, 0, 0, 0, 1, 0, 0, 0]);
-    // body @ 900: miscselect=0, misc_mask=0, attributes=MODE64BIT, xfrm=3.
-    ss[928..936].copy_from_slice(&ATTR_MODE64BIT.to_le_bytes());
-    ss[936..944].copy_from_slice(&XFRM_LEGACY.to_le_bytes());
-    ss[960..992].copy_from_slice(&mrenclave(segs, img, size));
-
-    // Signature is over header(128) ‖ body(128).
-    let mut payload = [0u8; 256];
-    payload[..128].copy_from_slice(&ss[0..128]);
-    payload[128..].copy_from_slice(&ss[900..1028]);
-    let digest: [u8; 32] = Sha256::digest(payload).into();
-
-    // PKCS#1 v1.5: 00 01 FF.. 00 <DigestInfo(SHA-256)> <hash>, big-endian.
-    let mut em = [0xffu8; MOD];
-    em[0] = 0;
-    em[1] = 1;
-    const DI: [u8; 19] = [
-        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-        0x05, 0x00, 0x04, 0x20,
-    ];
-    em[MOD - 52] = 0;
-    em[MOD - 51..MOD - 32].copy_from_slice(&DI);
-    em[MOD - 32..].copy_from_slice(&digest);
-
-    let n = BigUint::from_bytes_le(DEBUG_N);
-    let d = BigUint::from_bytes_le(DEBUG_D);
-    let m = BigUint::from_bytes_be(&em);
-    let s = m.modpow(&d, &n);
-    debug_assert_eq!(s.modpow(&BigUint::from(3u8), &n), m);
-    // q1 = ⌊s²/n⌋, q2 = ⌊s·(s² mod n)/n⌋ — precomputed so the CPU can do
-    // s³ mod n with multiplies only during EINIT.
-    let s2 = &s * &s;
-    let q1 = &s2 / &n;
-    let q2 = (&s * (&s2 % &n)) / &n;
-
-    ss[128..128 + MOD].copy_from_slice(DEBUG_N);
-    ss[512..516].copy_from_slice(&3u32.to_le_bytes());
-    ss[516..516 + MOD].copy_from_slice(&le384(&s));
-    ss[1040..1040 + MOD].copy_from_slice(&le384(&q1));
-    ss[1424..1424 + MOD].copy_from_slice(&le384(&q2));
-    ss
 }
 
 // --- vDSO lookup ---------------------------------------------------------

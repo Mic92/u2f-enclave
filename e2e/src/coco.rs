@@ -48,9 +48,9 @@ impl Hid {
     }
 }
 
-/// Issue a `makeCredential` and return `(authData, attStmt["snp"])`. Panics
+/// Issue a `makeCredential` and return `(authData, attStmt[key])`. Panics
 /// if absent — that is the property under test.
-pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8>) {
+pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str, key: &str) -> (Vec<u8>, Vec<u8>) {
     use ctap::cbor::Writer;
     let mut w = Writer::new();
     w.map(4);
@@ -88,7 +88,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
             3 => {
                 let m = rd.map().unwrap();
                 for _ in 0..m {
-                    if rd.text().unwrap() == "snp" {
+                    if rd.text().unwrap() == key {
                         rep = rd.bytes().unwrap().to_vec();
                     } else {
                         rd.skip().unwrap();
@@ -98,7 +98,7 @@ pub fn make_credential(dev: &Path, cdh: &[u8; 32], rp: &str) -> (Vec<u8>, Vec<u8
             _ => rd.skip().unwrap(),
         }
     }
-    assert!(!rep.is_empty(), "no \"snp\" in attStmt");
+    assert!(!rep.is_empty(), "no {key:?} in attStmt");
     (auth_data, rep)
 }
 

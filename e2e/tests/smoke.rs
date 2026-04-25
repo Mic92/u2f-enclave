@@ -18,9 +18,11 @@ fn libfido2_vmm() {
     fido2_roundtrip(&be.hidraw);
 }
 
-/// SGX backend; one EENTER per CTAPHID report each way.  Any divergence in
-/// MRENCLAVE/SIGSTRUCT/Q1Q2 makes EINIT reject before the bridge comes up,
-/// so a green run also covers the offline measurement.
+/// SGX backend; one EENTER per CTAPHID report each way.  EINIT verifies the
+/// build-time SIGSTRUCT (and so MRENCLAVE/Q1Q2/attr_mask) before the bridge
+/// comes up.  Then: EREPORT body matches `--measure`, REPORTDATA binds the
+/// registration, and a relaunch resolves the same credential — i.e. the
+/// MRSIGNER-bound seal key is in fact stable.
 #[test]
 fn libfido2_sgx() {
     let _g = serial_guard();
@@ -29,6 +31,42 @@ fn libfido2_sgx() {
     }
     let be = vmm_backend("--sgx");
     fido2_roundtrip(&be.hidraw);
+
+    let cdh = [0x33u8; 32];
+    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "sgx");
+    assert_eq!(rep.len(), 432);
+    assert_eq!(rep[48] & 0x02, 0, "DEBUG attribute set");
+
+    let m = Command::new(host_bin("u2f-enclave"))
+        .arg("--measure")
+        .output()
+        .unwrap();
+    let m = String::from_utf8(m.stdout).unwrap();
+    let want = |k: &str| {
+        m.lines()
+            .find(|l| l.starts_with(k))
+            .unwrap()
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(hex(&rep[64..96]), want("sgx mrenclave"), "MRENCLAVE");
+    assert_eq!(hex(&rep[128..160]), want("sgx mrsigner"), "MRSIGNER");
+
+    use sha2::Digest;
+    let mut h = sha2::Sha512::default();
+    h.update(&ad);
+    h.update(cdh);
+    assert_eq!(&rep[320..384], &h.finalize()[..], "REPORTDATA binding");
+
+    drop(be);
+    let be = vmm_backend("--sgx");
+    assert_eq!(
+        coco::get_assertion(&be.hidraw, &cdh, "example.org", coco::cred_id(&ad)),
+        0,
+        "launch-1 credential did not resolve after relaunch"
+    );
 }
 
 /// Full SEV-SNP path end to end: encrypted launch, GHCB up, virtio-mmio via
@@ -51,7 +89,7 @@ fn libfido2_vmm_snp() {
     fido2_roundtrip(&be.hidraw);
 
     let cdh = [0x11u8; 32];
-    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org");
+    let (ad, rep) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
     assert_eq!(rep.len(), 1184);
 
     // Documented user flow: vcek-url → curl → verify --vcek.
@@ -100,7 +138,7 @@ fn libfido2_vmm_snp() {
     let m1 = rep[0x90..0xc0].to_vec();
     drop(be);
     let be = vmm_backend("--snp");
-    let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org");
+    let (_, rep2) = coco::make_credential(&be.hidraw, &cdh, "example.org", "snp");
     assert_eq!(
         &rep2[0x90..0xc0],
         m1,

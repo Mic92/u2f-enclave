@@ -40,6 +40,7 @@
             packages = [
               rust
               pkgs.libfido2 # smoke-libfido2.sh
+              pkgs.openssl # genrsa for sgx_key.pem (build input, not linked)
             ];
           };
         }

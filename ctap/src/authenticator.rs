@@ -15,7 +15,7 @@ pub trait Platform {
     /// PSP-derived key bound to the launch measurement.
     fn master_secret(&self) -> [u8; 32];
     /// Hardware attestation evidence to embed in `attStmt` under `key`
-    /// (`"snp"`/`"tdx"`), or `None` for plain self-attestation.
+    /// (`"snp"`/`"sgx"`), or `None` for plain self-attestation.
     /// `report_data` is `SHA-512(authData || clientDataHash)` so the
     /// evidence binds to this exact registration.
     fn attestation(&mut self, report_data: &[u8; 64]) -> Option<(&'static str, Vec<u8>)> {
